@@ -358,8 +358,13 @@ def main() -> None:
 
     import numpy as np
     import torch
+    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
     torch.set_num_threads(max(1, int(args.torch_threads)))
+
+    if str(args.interface) != "sim":
+        print(f"[dds] ChannelFactoryInitialize(domain={int(args.domain)}, interface={args.interface})")
+        ChannelFactoryInitialize(int(args.domain), str(args.interface))
     try:
         torch.set_num_interop_threads(1)
     except RuntimeError:
