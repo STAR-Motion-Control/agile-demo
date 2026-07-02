@@ -22,3 +22,19 @@ tmp/
 *.mp4
 *.mov
 *.gif
+*.zip
+*.deb
+*.so
+*.o
+*.d
+*.npz
+*.npy
+*.pkl
+*.parquet
+
+# Local captures / bulky sim assets are documented in README instead.
+box_demo_2/img/
+decoupled_wbc/control/robot_model/model_data/g1/meshes/
+decoupled_wbc/sim2mujoco/resources/robots/g1/meshes/
+decoupled_wbc/dexmg/gr00trobocasa/robocasa/models/assets/
+decoupled_wbc/tests/replay_data/
