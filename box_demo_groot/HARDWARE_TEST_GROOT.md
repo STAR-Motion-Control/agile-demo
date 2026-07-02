@@ -9,7 +9,7 @@ box_demo 现已可用 GR00T-WBC 当运控底座(`--locomotion groot`)。流程:*
 
 > **cv2 not found / 跑错环境(2026-06-24 已修)**: 若启动 shell 里激活了某个 python venv(如 `g1_deploy`,提示符 `(g1_deploy)`),tmux pane 会继承它、`conda activate hdmi` 盖不掉 → box_demo 用错 python 报 `No module named 'cv2'`。`start_groot_wbc_box.sh` 已改成 `unset VIRTUAL_ENV` + 用**绝对路径 hdmi python**(`~/miniconda3/envs/hdmi/bin/python`)启动 box_demo/keyboard,彻底免疫。**手动跑 python 时同理**:先 `deactivate`(若有 venv),或直接用绝对路径 `~/miniconda3/envs/hdmi/bin/python`,别只 `conda activate hdmi`。
 
-把下面所有命令里的 `--iface` 换成你机器人实际的 DDS 网口(跟你上次 GR00T 真机测试用的一致,通常 `enp130s0` 或 `enP8p1s0`)。
+下面命令默认在 5080 上运行 GR00T/merger，因此 `--iface` 使用 5080 侧 DDS 网口 `enp130s0`。机器人侧 USB-C 网卡是 `enx2c16dbaa7742`，只用于机器人本体上运行的 box_demo/AGILE 脚本。
 
 ---
 
