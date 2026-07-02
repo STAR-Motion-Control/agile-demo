@@ -505,7 +505,7 @@ def publish_prepare(pub, crc, state_buf, joint_names: list[str], default_pos: to
 
 def main():
     p = argparse.ArgumentParser(description="AGILE lower-body rt/lowcmd_rl pipeline for box_demo_2")
-    p.add_argument("--iface", default=os.environ.get("UNITREE_DDS_INTERFACE", "enP8p1s0"))
+    p.add_argument("--iface", default=os.environ.get("UNITREE_DDS_INTERFACE", "enx2c16dbaa7742"))
     p.add_argument("--domain", type=int, default=0)
     p.add_argument("--agile-repo", type=Path, default=Path(os.environ.get("AGILE_REPO", DEFAULT_REPO)))
     p.add_argument("--policy", type=Path, default=None)

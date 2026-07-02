@@ -97,7 +97,7 @@ publish final `rt/lowcmd`.
 cd /path/to/sim2real/box_demo_2
 ./start_agile_box.sh \
   --vlm-endpoint https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --iface enP8p1s0 \
+  --iface enx2c16dbaa7742 \
   --agile-repo /path/to/WBC-AGILE \
   --device cpu \
   --confirm
@@ -115,7 +115,7 @@ Dry-run policy/IPC bring-up without publishing `rt/lowcmd_rl`:
 ```bash
 ./start_agile_box.sh \
   --vlm-endpoint https://dashscope.aliyuncs.com/compatible-mode/v1 \
-  --iface enP8p1s0 \
+  --iface enx2c16dbaa7742 \
   --agile-repo /path/to/WBC-AGILE \
   --dry-run
 ```

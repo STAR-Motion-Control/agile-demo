@@ -14,7 +14,7 @@ SIM2REAL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SESSION="${SESSION:-g1-agile-box}"
 
 VLM_ENDPOINT="${VLM_ENDPOINT:-}"
-IFACE="${IFACE:-enP8p1s0}"
+IFACE="${IFACE:-enx2c16dbaa7742}"
 AGILE_REPO="${AGILE_REPO:-$SIM2REAL_DIR/cc/experiments/repos/WBC-AGILE}"
 DEVICE="${DEVICE:-cpu}"
 WALK_SCALE="${WALK_SCALE:-1.0}"
@@ -51,7 +51,7 @@ done
 
 if [[ -z "$VLM_ENDPOINT" ]]; then
     echo "错误: 需要 --vlm-endpoint URL"
-    echo "用法: $0 --vlm-endpoint https://your-api/v1 [--iface enP8p1s0] [--confirm]"
+    echo "用法: $0 --vlm-endpoint https://your-api/v1 [--iface enx2c16dbaa7742] [--confirm]"
     exit 1
 fi
 

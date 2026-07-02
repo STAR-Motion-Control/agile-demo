@@ -1056,10 +1056,10 @@ export QWEN_API_KEY="your-api-key-here"
 curl http://192.168.112.198:5300/
 ```
 
-3. **确认机器人状态**：G1 已通电、急停已解除、DDS 网络接口名（本例 `enP8p1s0`）正确：
+3. **确认机器人状态**：G1 已通电、急停已解除、DDS 网络接口名（本例 `enx2c16dbaa7742`）正确：
 
 ```bash
-ip addr show enP8p1s0
+ip addr show enx2c16dbaa7742
 ```
 
 4. **设置 `LD_LIBRARY_PATH`**（避免加载错误的 `libddsc.so`，三个终端都需要）：
@@ -1071,7 +1071,7 @@ export LD_LIBRARY_PATH=/home/unitree/miniconda3/envs/robojudo_zihou2/lib:$LD_LIB
 ### 一键启动（推荐）
 
 ```bash
-./start.sh --vlm-endpoint https://dashscope.aliyuncs.com/compatible-mode/v1 --iface enP8p1s0
+./start.sh --vlm-endpoint https://dashscope.aliyuncs.com/compatible-mode/v1 --iface enx2c16dbaa7742
 ```
 
 该脚本会创建名为 `g1-grasp` 的 tmux session，包含三个窗格：
@@ -1098,7 +1098,7 @@ export LD_LIBRARY_PATH=/home/unitree/miniconda3/envs/robojudo_zihou2/lib:$LD_LIB
 conda activate robojudo_zihou2
 export LD_LIBRARY_PATH=/home/unitree/miniconda3/envs/robojudo_zihou2/lib:$LD_LIBRARY_PATH
 cd /home/unitree/unitree/unitree
-python zihou/box_demo_2/merge_lowcmd_arm_sdk.py --iface enP8p1s0
+python zihou/box_demo_2/merge_lowcmd_arm_sdk.py --iface enx2c16dbaa7742
 ```
 
 **作用**：500Hz 把 `rt/lowcmd_rl`（行走）与 `rt/arm_sdk`（手臂）合成为最终 `rt/lowcmd` 发给电机，是整个系统的中枢。
@@ -1121,7 +1121,7 @@ export LD_LIBRARY_PATH=/home/unitree/miniconda3/envs/robojudo_zihou2/lib:$LD_LIB
 cd /home/unitree/unitree/unitree
 
 python zihou/box_demo_2/box_demo_main.py \
-    --iface enP8p1s0 \
+    --iface enx2c16dbaa7742 \
     --vlm-endpoint https://dashscope.aliyuncs.com/compatible-mode/v1 \
     --vlm-api-key $QWEN_API_KEY \
     --vlm-model qwen-vl-max \
@@ -1132,7 +1132,7 @@ python zihou/box_demo_2/box_demo_main.py \
 
 | 参数 | 推荐值 | 说明 |
 |------|--------|------|
-| `--iface` | `enP8p1s0` | DDS 网卡（必填） |
+| `--iface` | `enx2c16dbaa7742` | DDS 网卡（必填） |
 | `--walk-scale` | `1.2` | 补偿 RL 侧移欠追踪（仅作用于前后向） |
 | `--no-confirm` | 视情况 | 跳过每次抓取前的 Enter 确认（**首次运行建议保留确认**） |
 | `--vlm-max-iter` | `5` | 最大抓取尝试次数 |
@@ -1173,7 +1173,7 @@ python box_demo_main.py [OPTIONS]
 | `--prompt` | `box` | SAM3 提示词，告诉模型要检测的物体类别 |
 | `--host` | `192.168.112.198` | SAM3 服务端 IP 地址 |
 | `--port` | `5300` | SAM3 服务端端口 |
-| `--iface` | 自动 | DDS 网络接口名（如 `eth0`、`enP8p1s0`） |
+| `--iface` | 自动 | DDS 网络接口名（如 `eth0`、`enx2c16dbaa7742`） |
 | `--no-confirm` | `False` | 跳过执行前的用户确认提示 |
 | `--end-behavior` | `handoff_rl_lower` | 结束行为：`handoff_rl_lower`（对齐 RL 后释放）或 `release`（直接释放） |
 | `--vlm-endpoint` | DashScope | VLM API 地址（OpenAI 兼容格式） |
@@ -1187,7 +1187,7 @@ python box_demo_main.py [OPTIONS]
 ### merge_lowcmd_arm_sdk.py
 
 ```
-python merge_lowcmd_arm_sdk.py --iface enP8p1s0
+python merge_lowcmd_arm_sdk.py --iface enx2c16dbaa7742
 ```
 
 | 参数 | 说明 |
@@ -1197,13 +1197,13 @@ python merge_lowcmd_arm_sdk.py --iface enP8p1s0
 ### start.sh
 
 ```bash
-./start.sh --vlm-endpoint URL [--iface enP8p1s0] [--walk-scale 1.0] [--confirm]
+./start.sh --vlm-endpoint URL [--iface enx2c16dbaa7742] [--walk-scale 1.0] [--confirm]
 ```
 
 | 参数 | 说明 |
 |------|------|
 | `--vlm-endpoint` | VLM API 地址（必填） |
-| `--iface` | DDS 网络接口（默认 `enP8p1s0`） |
+| `--iface` | DDS 网络接口（默认 `enx2c16dbaa7742`） |
 | `--walk-scale` | 行走距离补偿系数（默认 `1.0`） |
 | `--confirm` | 启用执行前确认提示 |
 

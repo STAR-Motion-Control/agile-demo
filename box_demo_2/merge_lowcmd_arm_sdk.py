@@ -8,9 +8,9 @@
   整段来自 arm_sdk（kp/kd/q 等与 box_demo 一致）。
 
 启动顺序（同一 DDS 域、同一网卡）：
-  1) python merge_lowcmd_arm_sdk.py --iface enP8p1s0
+  1) python merge_lowcmd_arm_sdk.py --iface enx2c16dbaa7742
   2) python run_pipeline.py -c g1_mjlab_loco_real_merge
-  3) python box_demo_main.py --iface enP8p1s0
+  3) python box_demo_main.py --iface enx2c16dbaa7742
 
 须先于 unitree_sdk2py 加载与 wheel 匹配的 libddsc（与 run_pipeline / box_demo 一致）。
 """
@@ -164,7 +164,7 @@ class Merger:
 
 def main():
     p = argparse.ArgumentParser(description="Merge rt/lowcmd_rl + rt/arm_sdk → rt/lowcmd")
-    p.add_argument("--iface", type=str, default=os.environ.get("UNITREE_DDS_INTERFACE", "enP8p1s0"))
+    p.add_argument("--iface", type=str, default=os.environ.get("UNITREE_DDS_INTERFACE", "enx2c16dbaa7742"))
     p.add_argument("--hz", type=float, default=500.0, help="发布 rt/lowcmd 频率")
     p.add_argument("--weight-threshold", type=float, default=1e-3, help="arm_sdk motor[29].q 超过此值则覆盖腰+臂")
     p.add_argument("--arm-stale-s", type=float, default=0.25, help="超过此时间未收到 arm_sdk 则只用 RL 上半身")
