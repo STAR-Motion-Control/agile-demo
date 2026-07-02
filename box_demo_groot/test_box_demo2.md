@@ -4,7 +4,7 @@ box_demo_2 的运控底座 = **GR00T-WBC**(decoupled-WBC)。本文件汇总两�
 1. **手动键盘驱底座**(`start_groot_wbc_manual.sh`)— 验证 GR00T-WBC 迈步 + **调线速度/角速度**。
 2. **完整抱箱 pipeline**(box_demo 跑机器人,运控经 HTTP 转 5080)— 详见 `HARDWARE_TEST_GROOT_REMOTE.md`。
 
-全程机器人吊架吊着 / 急停在手。所有底座进程跑在 **5080**(`192.168.123.222`,网口 `enp130s0`),经 DDS 下发到机器人(`enP8p1s0 = 192.168.123.164`)。
+全程机器人吊架吊着 / 急停在手。所有底座进程跑在 **5080**(`192.168.123.222`,网口 `enp130s0`),经 DDS 下发到机器人(`enx2c16dbaa7742 = 192.168.123.164`)。
 
 > 上机前先确认 DDS 链路活着:`ip -br addr show enp130s0`(应有 192.168.123.222/UP)、`ping -c2 192.168.123.164`(0% 丢包)。链路断 → merger/adapter 会 `create domain error` 崩(不是代码 bug)。
 >
@@ -96,7 +96,7 @@ ssh unitree@192.168.123.164
 conda activate robojudo
 cd /home/unitree/zihou/box_demo_2
 UNITREE_SUDO_PASS=123 python box_demo_main.py --locomotion remote --no-vlm \
-  --ipc-url http://192.168.123.222:5001 --host 192.168.123.222 --port 5300 --iface enP8p1s0
+  --ipc-url http://192.168.123.222:5001 --host 192.168.123.222 --port 5300 --iface enx2c16dbaa7742
 ```
 
 > §1 的 `--key-vx/--key-vy/--key-wz` **不影响** pipeline 阶段的走位 —— pipeline 的小步对齐速度由 `groot_mover.py` 的 `FWD_CRUISE/LAT_CRUISE/YAW_CRUISE` + floor + warmup 决定(SAM3 给 cm/度,GrootMover 换算成速度×时长)。
@@ -139,7 +139,7 @@ ssh unitree@192.168.123.164
 conda activate robojudo
 cd /home/unitree/zihou/box_demo_2
 UNITREE_SUDO_PASS=123 python box_demo_main.py --locomotion remote --no-vlm \
-  --ipc-url http://192.168.123.222:5001 --host 192.168.123.222 --port 5300 --iface enP8p1s0
+  --ipc-url http://192.168.123.222:5001 --host 192.168.123.222 --port 5300 --iface enx2c16dbaa7742
 # box_demo 打印每步 "forward Xcm (v=..., ...s)";想对比关 warmup 加 --warmup-time 0
 ```
 
@@ -148,7 +148,7 @@ UNITREE_SUDO_PASS=123 python box_demo_main.py --locomotion remote --no-vlm \
 先站立高度走到位→停→再蹲抓,别边蹲边走;要"蹲前自动抬高再走"加 `--auto-raise-walk`。
 
 > **部署提醒**:上面命令要求机器人已装**新版** `groot_mover.py`/`remote_mover.py`/`box_demo_main.py`/`test_small_moves.py`。
-> 机器人当前离线(enp130s0 DOWN)。链路恢复后从 5080 一条命令推:
+> DDS 链路当前离线(5080 enp130s0 或机器人 enx2c16dbaa7742 未通)。链路恢复后从 5080 一条命令推:
 > `ssh 5080-laptop 'scp ~/agile_boxdeploy/box_demo_2/{groot_mover,remote_mover,box_demo_main,test_small_moves}.py unitree@192.168.123.164:/home/unitree/zihou/box_demo_2/'`
 
 ---

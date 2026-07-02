@@ -18,13 +18,13 @@ box_demo 跑在 **机器人(unitree-002)** 上(头部 RealSense USB 直连),运�
 │                              │                  │   ▼ /tmp/robojudo_ext_cmd.json   │
 │  rt/arm_sdk ── DDS ──────────┼──────┐           │ GR00T adapter ─> rt/lowcmd_rl    │
 └──────────────────────────────┘      │           │ merger ─> rt/lowcmd ─> 机器人    │
-        enP8p1s0 192.168.123.164  └─DDS┴──────────>│ enp130s0 192.168.123.222         │
+        enx2c16dbaa7742 192.168.123.164  └─DDS┴──────────>│ enp130s0 192.168.123.222         │
 └─────────────────────────────────────────────────┴──────────────────────────────────┘
 ```
 
 ## 已部署 / 关键事实(2026-06-24)
 
-- **机器人** `unitree-002`:wifi `10.33.2.42`,到 5080 的 DDS 网口 **`enP8p1s0` = 192.168.123.164**。box_demo_2 在 **`/home/unitree/zihou/box_demo_2`**(旧 4 月版已备份 `box_demo_2.apr16.bak`,当前版已 rsync 覆盖)。
+- **机器人** `unitree-002`:wifi `10.33.2.42`,到 5080 的 DDS 网口 **`enx2c16dbaa7742` = 192.168.123.164**。box_demo_2 在 **`/home/unitree/zihou/box_demo_2`**(旧 4 月版已备份 `box_demo_2.apr16.bak`,当前版已 rsync 覆盖)。
 - **运行环境 = `robojudo`**(有 `unitree_sdk2py` + 臂 IK + cv2/pyrealsense2/torch;**不是** README 写的 `robojudo_zihou2`,那个缺 `unitree_sdk2py`)。已 `pip install requests httpx openai`。
 - **5080** = `192.168.123.222`(enp130s0)。底座/桥用 `hdmi` env。box_demo_2 在 `~/agile_boxdeploy/box_demo_2`。
 - **相机**:D435I,serial `254322075278`(= capture_and_predict 默认),USB 直连机器人。停 `videohub_pc4` 释放相机需 `UNITREE_SUDO_PASS=123`(运行时传,**不写进任何文件**)。
@@ -66,7 +66,7 @@ cd /home/unitree/zihou/box_demo_2
 # 先验证整条链路用 --no-vlm(只测 走位 + SAM3 + 抓取)
 UNITREE_SUDO_PASS=123 python box_demo_main.py --locomotion remote --no-vlm \
   --ipc-url http://192.168.123.222:5001 --host 192.168.123.222 --port 5300 \
-  --iface enP8p1s0
+  --iface enx2c16dbaa7742
 ```
 
 流程:相机拍照 → (VLM 关时跳过框选,直接) SAM3 测两个抓取面 → 自动小步对齐(打印每步 cm,经 HTTP 转给 5080 底座)→ 快/完整 IK → **抓取前停下等 Enter** → 双臂抱箱(rt/arm_sdk)→ 切 RL_LOWER 腿保持平衡。
