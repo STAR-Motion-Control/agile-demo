@@ -1,0 +1,129 @@
+{
+  "_doc": "Machine-readable per-task parameters for ManipArena v2 (BENCHMARK_V2_DESIGN.md §4-5). Companion to TASKS_V2.md and manip_mission.py. variant_count is fixed at 50 (seeds 0-49, all models share). trials_default is per-model. uses_box / uses_psi0 gate which harness subsystems are loaded.",
+  "shared": {
+    "variant_seeds": [0, 49],
+    "h_pick_tiers": [0.30, 0.45, 0.60, 0.75],
+    "h_pick_rule": "variant_seed mod 4",
+    "nav_tol_coarse": {"pos_m": 0.30, "yaw_deg": 15.0},
+    "nav_tol_cal": {"pos_m": 0.05, "yaw_deg": 5.0, "hold_s": 1.0},
+    "grasp": {"d_grasp_m": 0.30, "cube_touch_d_m": 0.15},
+    "place_ok": {"upright_tol_deg": 30.0, "max_speed_mps": 0.05, "pos_tol_m": 0.20},
+    "fall": {"tilt_gxy": 0.9},
+    "nav_pillar_avoidance": {"keep_out_m": 0.40, "detour_margin_m": 0.10, "note": "NavLegs threaded with pillar{pos,r} (build_m1/build_m2 primary legs) insert one lateral detour waypoint at leg start when the straight (live root pose)->target segment is within keep_out_m of the pillar centre, offset pillar.r+keep_out_m+detour_margin_m away from the pillar; runtime insertion, does NOT change n_primitives or builder signatures"}
+  },
+  "tasks": {
+    "arena_L1": {
+      "name": "walk",
+      "series": "L",
+      "trials_default": 5,
+      "trials_note": "5 speed bins {0.4,0.6,0.8,1.0,1.2} m/s per variant",
+      "uses_box": false,
+      "uses_psi0": false,
+      "variant_count": 50,
+      "scene_fields": ["spawn", "lane"],
+      "stage_engine": "harness.command_at:walk_speed",
+      "speed_bins_mps": [0.4, 0.6, 0.8, 1.0, 1.2],
+      "duration_s": 10.0
+    },
+    "arena_L2": {
+      "name": "circle",
+      "series": "L",
+      "trials_default": 1,
+      "uses_box": false,
+      "uses_psi0": false,
+      "variant_count": 50,
+      "scene_fields": ["spawn", "pillar"],
+      "stage_engine": "harness.command_at:circle_pillar",
+      "vx_mps": 0.4,
+      "wz_radps": 0.4,
+      "radius_m": 1.0,
+      "laps": 2
+    },
+    "arena_L3": {
+      "name": "goto",
+      "series": "L",
+      "trials_default": 1,
+      "uses_box": false,
+      "uses_psi0": false,
+      "variant_count": 50,
+      "scene_fields": ["spawn", "targets.P_pick_front"],
+      "stage_engine": "harness.NavMission",
+      "nav_mode": "coarse_then_cal"
+    },
+    "arena_L4": {
+      "name": "vln",
+      "series": "L",
+      "trials_default": 1,
+      "trials_note": "1 per variant per tape",
+      "uses_box": false,
+      "uses_psi0": false,
+      "variant_count": 50,
+      "scene_fields": ["spawn", "pillar", "Z_store", "T_pick", "T_relay"],
+      "stage_engine": "harness.command_at:vln_follow",
+      "tape_source": "make_vln_tapes.py"
+    },
+    "arena_L5": {
+      "name": "squat_limit",
+      "series": "L",
+      "trials_default": 1,
+      "uses_box": true,
+      "uses_box_note": "2kg box welded from t=0 in the hug pose (no Psi0)",
+      "uses_psi0": false,
+      "variant_count": 50,
+      "scene_fields": ["spawn"],
+      "stage_engine": "harness.command_at:squat_limit",
+      "descent_rate_mps": 0.05,
+      "min_h_m": 0.10,
+      "bottom_hold_s": 3.0
+    },
+    "arena_M1": {
+      "name": "table_pick_place",
+      "series": "M",
+      "trials_default": 50,
+      "trials_note": "1 per variant",
+      "uses_box": true,
+      "uses_psi0": true,
+      "variant_count": 50,
+      "scene_fields": [
+        "spawn", "T_pick", "H_pick", "box", "Z_store", "pillar",
+        "targets.P_pick_front", "targets.P_store",
+        "grasp.box_grasp_h", "grasp.d_grasp"
+      ],
+      "stage_engine": "manip_mission.build_m1",
+      "n_primitives": 8,
+      "n_functional_stages": 5,
+      "psi0_segments": ["reach_down", "carry", "place"],
+      "vx_carry_mps": 0.5,
+      "squat_rate_mps": 0.20,
+      "report_stratified_by": "H_pick"
+    },
+    "arena_M2": {
+      "name": "relay_pick_place",
+      "series": "M",
+      "trials_default": 50,
+      "trials_note": "1 per variant",
+      "uses_box": true,
+      "uses_psi0": true,
+      "uses_cube": true,
+      "variant_count": 50,
+      "scene_fields": [
+        "spawn", "T_pick", "H_pick", "box", "T_relay", "cube",
+        "Z_store", "pillar",
+        "targets.P_pick_front", "targets.P_relay_front",
+        "targets.P_cube_touch", "targets.P_store",
+        "grasp.box_grasp_h", "grasp.d_grasp", "grasp.cube_touch_d"
+      ],
+      "stage_engine": "manip_mission.build_m2",
+      "n_primitives": 20,
+      "n_functional_stages": 7,
+      "psi0_segments": ["reach_down", "carry", "place"],
+      "vx_carry_mps": 0.5,
+      "squat_rate_mps": 0.20,
+      "report_stratified_by": "H_pick",
+      "diagnostic_flags": [
+        "nav_arrival_err", "place_ok_relay", "cube_transfer_ok",
+        "regrasp_ok", "place_ok_store", "per_stage_fall"
+      ]
+    }
+  }
+}

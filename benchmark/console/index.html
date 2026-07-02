@@ -1,0 +1,687 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>G1 下半身控制器 Benchmark · 实验控制台</title>
+<style>
+  :root {
+    --ink: #10131a;
+    --ink-2: #3c4458;
+    --muted: #6b7588;
+    --line: #e3e7ee;
+    --bg: #f6f8fb;
+    --card: #ffffff;
+    --accent: #4f7cff;
+    --accent-dark: #3a5fd9;
+    --ok: #18965a;
+    --ok-bg: #e7f6ee;
+    --bad: #d23c3c;
+    --bad-bg: #fdeeee;
+    --warn: #c07f10;
+    --hero-1: #0b1020;
+    --hero-2: #15224d;
+    --radius: 12px;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.65 -apple-system, "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  }
+  a { color: var(--accent); }
+
+  /* ============ hero ============ */
+  header.hero {
+    background:
+      radial-gradient(1100px 500px at 80% -10%, rgba(79,124,255,.35), transparent 60%),
+      radial-gradient(700px 420px at 10% 110%, rgba(46,196,151,.18), transparent 60%),
+      linear-gradient(160deg, var(--hero-1), var(--hero-2));
+    color: #eef2ff; text-align: center; padding: 64px 24px 46px;
+  }
+  .hero-kicker {
+    display: inline-block; letter-spacing: .18em; font-size: 12px;
+    color: #9db1e8; text-transform: uppercase; margin-bottom: 14px;
+  }
+  h1 { font-size: 34px; margin: 0 0 12px; font-weight: 800; line-height: 1.25; }
+  .hero-sub { max-width: 860px; margin: 0 auto; color: #c4cfec; font-size: 15px; }
+  .hero-badges { margin-top: 22px; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
+  .round-badge {
+    border: 1px solid rgba(255,255,255,.22); border-radius: 999px;
+    padding: 5px 14px; font-size: 12.5px; color: #dfe7ff;
+    background: rgba(255,255,255,.07);
+  }
+  .round-badge b { color: #fff; margin-right: 6px; }
+  .hero-stats { margin-top: 18px; color: #8fa3d8; font-size: 12.5px; }
+  .hero-stats b { color: #fff; }
+
+  /* ============ sticky anchor nav ============ */
+  nav.anchors {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(11,16,32,.92); backdrop-filter: blur(8px);
+    display: flex; justify-content: center; gap: 4px; padding: 0 12px;
+    overflow-x: auto;
+  }
+  nav.anchors a {
+    color: #aab8dd; text-decoration: none; font-size: 13.5px;
+    padding: 13px 16px; border-bottom: 2px solid transparent; white-space: nowrap;
+  }
+  nav.anchors a:hover { color: #fff; }
+  nav.anchors a.active { color: #fff; border-bottom-color: var(--accent); }
+
+  /* ============ layout ============ */
+  main { max-width: 1240px; margin: 0 auto; padding: 40px 28px 90px; }
+  section { margin-bottom: 56px; scroll-margin-top: 64px; }
+  .sec-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 6px; }
+  .sec-num {
+    font-family: var(--mono); font-size: 13px; color: var(--accent);
+    border: 1px solid var(--accent); border-radius: 6px; padding: 1px 7px;
+  }
+  h2 { font-size: 22px; margin: 0; }
+  .sec-desc { color: var(--muted); font-size: 13px; margin: 0 0 18px; }
+  .panel {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 20px 24px;
+    box-shadow: 0 1px 2px rgba(16,19,26,.04);
+  }
+
+  /* goals */
+  .goal-grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  .goal-card {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 16px 18px; display: flex; gap: 12px; align-items: flex-start;
+  }
+  .goal-idx {
+    flex: 0 0 28px; height: 28px; border-radius: 8px; background: #eef3ff;
+    color: var(--accent-dark); font-weight: 800; display: flex;
+    align-items: center; justify-content: center; font-size: 14px;
+  }
+
+  /* protocol */
+  ul.protocol { margin: 0; padding-left: 20px; }
+  ul.protocol li { margin: 9px 0; }
+  ul.protocol li::marker { color: var(--accent); }
+  .doc-link {
+    display: inline-block; margin-top: 14px; font-weight: 700; font-size: 13px;
+    text-decoration: none; color: var(--accent);
+  }
+  .doc-link:hover { text-decoration: underline; }
+
+  /* experiments tables */
+  details.round { margin-bottom: 16px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--card); overflow: hidden; }
+  details.round summary {
+    cursor: pointer; padding: 14px 20px; font-weight: 700; font-size: 15px;
+    list-style: none; display: flex; align-items: center; gap: 10px; user-select: none;
+  }
+  details.round summary::-webkit-details-marker { display: none; }
+  details.round summary .tw { transition: transform .15s; color: var(--muted); font-size: 12px; }
+  details.round[open] summary .tw { transform: rotate(90deg); }
+  details.round summary .r-desc { color: var(--muted); font-weight: 400; font-size: 12.5px; }
+  details.round summary:hover { background: #fafbfd; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 9px 14px; text-align: left; border-top: 1px solid var(--line); vertical-align: top; }
+  th { background: #f4f6fa; color: #46506a; font-weight: 600; white-space: nowrap; border-top: none; }
+  td.num { white-space: nowrap; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 12.5px; }
+  tr.row-bad td { background: var(--bad-bg); }
+  .rate { font-weight: 700; }
+  .rate.ok { color: var(--ok); } .rate.warn { color: var(--warn); } .rate.bad { color: var(--bad); }
+  .model-tag {
+    display: inline-block; padding: 1px 9px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 700; color: #fff; letter-spacing: .02em;
+  }
+  .m-AGILE { background: #4f7cff; } .m-HOMIE { background: #8a5cd6; }
+  .m-AMO { background: #d9803a; } .m-FALCON { background: #2c9e8f; }
+  .m-LJK-FALCON { background: #c0497d; }
+  .m-LJK-FALCON-V5 { background: #8e2d6e; }
+  .m-AGILE-DEEPSQUAT { background: #2b4fb0; }
+  .m-GR00T-WBC { background: #5a9e2c; }
+  .settings { color: var(--muted); font-size: 12px; }
+
+  /* ============ test commands ============ */
+  #harnessTable td { font-size: 12.5px; vertical-align: top; }
+  #harnessTable td.mono, .cmd code { font-family: var(--mono); }
+  .cmd-rd { margin: 22px 0 6px; font-size: 14px; color: var(--ink); font-weight: 700; }
+  .cmd-rd small { color: var(--muted); font-weight: 500; margin-left: 8px; }
+  .cmd-item { margin: 8px 0; }
+  .cmd-hd { font-size: 12.5px; color: var(--ink-2); margin-bottom: 4px; }
+  .cmd-hd b { font-family: var(--mono); color: var(--accent-dark); }
+  .cmd-hd .cmd-lbl { color: var(--muted); margin-left: 8px; }
+  pre.cmd {
+    margin: 0; background: #0f1424; color: #d7e0f5; border-radius: 8px;
+    padding: 10px 12px; overflow-x: auto; font-size: 12px; line-height: 1.5;
+    position: relative; border: 1px solid #1c2540;
+  }
+  pre.cmd code { background: none; color: inherit; white-space: pre; }
+  .copy-btn {
+    position: absolute; top: 7px; right: 7px; cursor: pointer;
+    background: rgba(255,255,255,.10); color: #cdd8f5; border: 1px solid rgba(255,255,255,.18);
+    border-radius: 6px; font-size: 11px; padding: 2px 8px;
+  }
+  .copy-btn:hover { background: rgba(255,255,255,.20); }
+  .copy-btn.done { color: #7be3a8; border-color: #2f7d5d; }
+  .cmd-notes ul { margin: 0; padding-left: 18px; }
+  .cmd-notes li { color: var(--ink-2); font-size: 12.5px; margin: 4px 0; }
+  .cmd-notes code { font-family: var(--mono); font-size: 11.5px; }
+
+  /* video library */
+  .filters { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+  .filter-row { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .filter-label { width: 40px; color: var(--muted); font-size: 12.5px; flex-shrink: 0; }
+  .chip {
+    border: 1px solid var(--line); background: var(--card); color: var(--ink-2);
+    border-radius: 999px; padding: 4px 13px; font-size: 12.5px; cursor: pointer;
+  }
+  .chip:hover { border-color: var(--accent); color: var(--accent); }
+  .chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .video-count { color: var(--muted); font-size: 12.5px; margin-bottom: 14px; }
+  .vgrid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); }
+  .vcard {
+    background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+    overflow: hidden; display: flex; flex-direction: column;
+    box-shadow: 0 1px 2px rgba(16,19,26,.04);
+  }
+  .vcard video { width: 100%; aspect-ratio: 4 / 3; background: #0c0f16; display: block; }
+  .vbody { padding: 11px 13px 13px; }
+  .vtitle { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .badge { padding: 0 8px; border-radius: 999px; font-size: 11px; font-weight: 700; color: #fff; line-height: 18px; }
+  .badge.ok { background: var(--ok); } .badge.fail { background: var(--bad); }
+  .badge.round { background: #76829c; }
+  .vsub { color: var(--muted); font-size: 12px; margin-top: 5px; word-break: break-all; }
+
+  /* render console */
+  .rc { display: grid; gap: 20px; grid-template-columns: minmax(330px, 430px) 1fr; align-items: start; }
+  @media (max-width: 980px) { .rc { grid-template-columns: 1fr; } }
+  .seg { display: flex; gap: 6px; flex-wrap: wrap; }
+  .seg button {
+    border: 1px solid var(--line); background: #fff; color: var(--ink-2);
+    border-radius: 9px; padding: 7px 16px; font-size: 13.5px; cursor: pointer; font-weight: 600;
+  }
+  .seg button.on { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .rc-label { font-size: 12.5px; color: var(--muted); font-weight: 600; margin: 18px 0 8px; letter-spacing: .04em; }
+  .rc-label:first-child { margin-top: 0; }
+  .slider-row { margin: 14px 0 4px; }
+  .slider-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; }
+  .slider-head .val { font-family: var(--mono); font-weight: 700; color: var(--accent-dark); font-size: 14px; }
+  input[type="range"] { width: 100%; accent-color: var(--accent); margin: 8px 0 2px; cursor: pointer; }
+  .slider-minmax { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; font-family: var(--mono); }
+  .submit-btn {
+    margin-top: 20px; width: 100%; border: none; border-radius: 10px;
+    background: var(--accent); color: #fff; font-size: 15px; font-weight: 700;
+    padding: 12px; cursor: pointer;
+  }
+  .submit-btn:hover { background: var(--accent-dark); }
+  .submit-btn:disabled { background: #aebbd6; cursor: not-allowed; }
+  .rc-note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+  .job-status { border: 1px dashed var(--line); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; background: #fbfcfe; }
+  .job-status.hidden { display: none; }
+  .js-line { display: flex; align-items: center; gap: 10px; font-size: 13.5px; font-weight: 600; }
+  .spinner {
+    width: 14px; height: 14px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid #c9d6f5; border-top-color: var(--accent);
+    animation: spin 0.9s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .st-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .st-done { background: var(--ok); } .st-failed { background: var(--bad); }
+  pre.logtail {
+    margin: 10px 0 0; max-height: 180px; overflow: auto; background: #0c0f16;
+    color: #9fe3b4; border-radius: 8px; padding: 10px 12px;
+    font: 11px/1.5 var(--mono); white-space: pre-wrap; word-break: break-all;
+  }
+  .err-text { color: var(--bad); font-size: 12.5px; margin-top: 6px; }
+  .hist-title { font-size: 14px; font-weight: 700; margin: 4px 0 12px; }
+  .hist-empty { color: var(--muted); font-size: 13px; }
+  .hist-item { border: 1px solid var(--line); border-radius: 10px; background: #fff; padding: 12px 14px; margin-bottom: 12px; }
+  .hist-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; }
+  .hist-params { font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+  .hist-time { color: var(--muted); font-size: 11.5px; margin-left: auto; font-family: var(--mono); }
+  .hist-videos { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); margin-top: 10px; }
+  .hist-videos video { width: 100%; aspect-ratio: 4/3; background: #0c0f16; border-radius: 8px; }
+  .error-box {
+    background: var(--bad-bg); border: 1px solid #f0c4c4; color: #9b3434;
+    padding: 16px 20px; border-radius: var(--radius); font-size: 13px;
+  }
+  footer { text-align: center; color: var(--muted); font-size: 12px; padding: 30px 0 50px; }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <span class="hero-kicker">G1 Lower-Body Controller Benchmark</span>
+  <h1>精确导航 + 蹲起搬箱 · 四控制器 sim2sim 横评</h1>
+  <p class="hero-sub" id="heroSub">AGILE / HOMIE / AMO / FALCON 在 MuJoCo 中的统一规范横评：1 m/s 行走 · 2 kg 捧箱蹲起 ×20 · r=1 m 绕柱 · 5 cm/5° 到点校准 · Psi0 上身在环。</p>
+  <div class="hero-badges" id="heroBadges"></div>
+  <div class="hero-stats" id="heroStats">载入 manifest…</div>
+</header>
+
+<nav class="anchors" id="anchors">
+  <a href="#sec-goals">项目目标</a>
+  <a href="#sec-protocol">标准流程</a>
+  <a href="#sec-exp">实验记录</a>
+  <a href="#sec-videos">视频库</a>
+  <a href="#sec-render">交互渲染台</a>
+  <a href="#sec-cmds">测试指令</a>
+</nav>
+
+<main>
+  <section id="sec-goals">
+    <div class="sec-head"><span class="sec-num">01</span><h2>项目目标</h2></div>
+    <p class="sec-desc" id="genAt"></p>
+    <div class="goal-grid" id="goals"></div>
+  </section>
+
+  <section id="sec-protocol">
+    <div class="sec-head"><span class="sec-num">02</span><h2>标准实验流程</h2></div>
+    <p class="sec-desc">规范版本史与新增实验标准步骤摘要（完整文档见 PROTOCOL.md）</p>
+    <div class="panel">
+      <ul class="protocol" id="protocol"></ul>
+      <a class="doc-link" id="protoLink" href="PROTOCOL.md" target="_blank">查看完整 PROTOCOL.md →</a>
+    </div>
+  </section>
+
+  <section id="sec-exp">
+    <div class="sec-head"><span class="sec-num">03</span><h2>实验记录</h2></div>
+    <p class="sec-desc">按轮次折叠的全量批次汇总（每行 = 一个〈模型, 测试〉批次；含摔倒或成功率 &lt; 50% 的行标红）</p>
+    <div id="expTables"></div>
+  </section>
+
+  <section id="sec-videos">
+    <div class="sec-head"><span class="sec-num">04</span><h2>视频库</h2></div>
+    <p class="sec-desc">R2+ 烧字幕视频（标准批次样本）；按 模型 × 测试 × 结果 过滤，点击播放</p>
+    <div class="filters" id="filters"></div>
+    <div class="video-count" id="videoCount"></div>
+    <div class="vgrid" id="vgrid"></div>
+  </section>
+
+  <section id="sec-render">
+    <div class="sec-head"><span class="sec-num">05</span><h2>交互渲染台</h2></div>
+    <p class="sec-desc">在 4090 上现跑一个自定义参数 trial（约 1–8 分钟，串行队列），完成后视频就地播放并进入历史。成功/失败标签按标准批次判据，自定义参数下仅供参考。</p>
+    <div class="rc">
+      <div class="panel">
+        <div class="rc-label">模型</div>
+        <div class="seg" id="segModel">
+          <button data-v="homie" class="on">HOMIE</button>
+          <button data-v="agile">AGILE</button>
+        </div>
+        <div class="rc-label">动作类型</div>
+        <div class="seg" id="segKind">
+          <button data-v="squat" class="on">蹲起（捧箱）</button>
+          <button data-v="walk">行走</button>
+          <button data-v="circle">绕柱</button>
+        </div>
+        <div id="sliders"></div>
+        <button class="submit-btn" id="submitBtn">提交渲染任务</button>
+        <p class="rc-note">单工作线程串行执行 · 任务超时 600 s · 视频带烧录字幕落入 videos/custom/</p>
+      </div>
+      <div>
+        <div class="job-status hidden" id="jobStatus"></div>
+        <div class="hist-title">自定义渲染历史</div>
+        <div id="history"><p class="hist-empty">暂无历史任务</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="sec-cmds">
+    <div class="sec-head"><span class="sec-num">06</span><h2>测试指令</h2></div>
+    <p class="sec-desc">每个模型用各自的 <code>bench_&lt;model&gt;.py</code> harness、在各自服务器上跑同一份测试规范。下表为机器 / 解释器 / 工作目录 / 脚本 / 权重映射；命令模板用 <code>$PY bench_&lt;m&gt;.py</code> 占位。</p>
+    <div class="panel" style="overflow-x:auto">
+      <table id="harnessTable"><thead><tr>
+        <th>模型</th><th>服务器</th><th>工作目录</th><th>脚本</th><th>解释器 / 环境</th><th>权重</th>
+      </tr></thead><tbody id="harnessBody"></tbody></table>
+    </div>
+    <div id="cmdGroups"></div>
+    <div class="panel cmd-notes"><ul id="cmdNotes"></ul></div>
+  </section>
+</main>
+
+<footer>G1 Benchmark Console · 同源静态 + 渲染 API（server.py @ 4090）· 无外部依赖</footer>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s == null ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;");
+
+/* ================= manifest sections ================= */
+const state = { model: "all", test: "all", outcome: "all", round: "all" };
+let MANIFEST = null;
+
+function rateClass(r) { return r >= 0.9 ? "ok" : r >= 0.5 ? "warn" : "bad"; }
+
+function renderHero(m) {
+  $("heroBadges").innerHTML = Object.entries(m.rounds || {})
+    .map(([rid, d]) => `<span class="round-badge"><b>${esc(rid)}</b>${esc(d)}</span>`).join("");
+  const trials = m.experiments.reduce((s, e) => s + e.n_trials, 0);
+  const falls = m.experiments.reduce((s, e) => s + e.n_falls, 0);
+  $("heroStats").innerHTML =
+    `<b>${m.experiments.length}</b> 个实验批次 · <b>${trials}</b> trials · ` +
+    `<b>${falls}</b> 次摔倒 · <b>${m.videos.length}</b> 个视频 · 更新 ${esc((m.generated_at || "").slice(0, 10))}`;
+}
+
+function renderGoals(m) {
+  $("goals").innerHTML = m.goals.map((g, i) =>
+    `<div class="goal-card"><div class="goal-idx">${i + 1}</div><div>${esc(g)}</div></div>`).join("");
+  $("genAt").textContent = `manifest 生成于 ${m.generated_at} · make_manifest.py 自动扫描 results/`;
+}
+
+function renderProtocol(m) {
+  $("protocol").innerHTML = m.protocol_summary.map((p) => `<li>${esc(p)}</li>`).join("");
+  if (m.protocol_doc) $("protoLink").href = m.protocol_doc;
+}
+
+function renderCommands(m) {
+  const sec = $("sec-cmds");
+  if (!m.commands || !m.commands.length) { if (sec) sec.style.display = "none"; return; }
+  const tagCls = (mo) => "m-" + String(mo).toUpperCase().replace(/[^A-Z0-9-]/g, "-");
+  $("harnessBody").innerHTML = (m.harnesses || []).map((h) => `<tr>
+    <td><span class="model-tag ${tagCls(h.model)}">${esc(h.model)}</span></td>
+    <td>${esc(h.server)}</td>
+    <td class="mono">${esc(h.workdir)}</td>
+    <td class="mono">${esc(h.script)}</td>
+    <td class="mono">${esc(h.env)}</td>
+    <td>${esc(h.weights)}</td></tr>`).join("");
+  $("cmdGroups").innerHTML = m.commands.map((g) => `
+    <div class="cmd-rd">${esc(g.round)}<small>${esc(g.title)}</small></div>
+    ${g.items.map((it) => `<div class="cmd-item">
+      <div class="cmd-hd"><b>${esc(it.test)}</b><span class="cmd-lbl">${esc(it.label)}</span></div>
+      <pre class="cmd"><button class="copy-btn">复制</button><code>${esc(it.cmd)}</code></pre>
+    </div>`).join("")}`).join("");
+  $("cmdNotes").innerHTML = (m.command_notes || []).map((n) => `<li>${esc(n)}</li>`).join("");
+  $("cmdGroups").querySelectorAll(".copy-btn").forEach((b) => {
+    b.addEventListener("click", () => {
+      const code = b.parentElement.querySelector("code").textContent;
+      navigator.clipboard.writeText(code).then(() => {
+        b.textContent = "已复制"; b.classList.add("done");
+        setTimeout(() => { b.textContent = "复制"; b.classList.remove("done"); }, 1500);
+      });
+    });
+  });
+}
+
+function expRow(e) {
+  const pct = (e.success_rate * 100).toFixed(0);
+  const bad = e.n_falls > 0 || e.success_rate < 0.5;
+  return `<tr class="${bad ? "row-bad" : ""}">
+    <td><span class="model-tag m-${esc(e.model)}">${esc(e.model)}</span></td>
+    <td>${esc(e.label)}</td>
+    <td class="num">${e.n_trials}</td>
+    <td class="num"><span class="rate ${rateClass(e.success_rate)}">${e.n_success}/${e.n_trials} (${pct}%)</span></td>
+    <td class="num">${e.n_falls > 0 ? `<span class="rate bad">${e.n_falls}</span>` : "0"}</td>
+    <td>${esc(e.key_metrics)}</td>
+    <td class="settings">${esc(e.settings)}</td>
+  </tr>`;
+}
+
+function renderTables(m) {
+  const rids = Object.keys(m.rounds);
+  $("expTables").innerHTML = rids.map((rid, i) => {
+    const rows = m.experiments.filter((e) => e.round === rid);
+    if (!rows.length) return "";
+    const nf = rows.reduce((s, e) => s + e.n_falls, 0);
+    return `<details class="round"${i === rids.length - 1 ? " open" : ""}>
+      <summary><span class="tw">▶</span>${esc(rid)}
+        <span class="r-desc">${esc(m.rounds[rid])} · ${rows.length} 批次 · ${nf} 摔倒</span></summary>
+      <table><thead><tr>
+        <th>模型</th><th>测试</th><th>trials</th><th>成功率</th><th>摔倒</th><th>关键指标</th><th>设置摘要</th>
+      </tr></thead><tbody>${rows.map(expRow).join("")}</tbody></table>
+    </details>`;
+  }).join("");
+}
+
+/* ---------- video library ---------- */
+const OUTCOME_TEXT = { success: "成功", fail: "失败" };
+const uniq = (a) => [...new Set(a)];
+
+function filterDefs(m) {
+  return [
+    { key: "model", label: "模型", opts: uniq(m.videos.map((v) => v.model)).sort() },
+    { key: "test", label: "测试", opts: uniq(m.videos.map((v) => v.test)).sort() },
+    { key: "outcome", label: "结果", opts: ["success", "fail"] },
+    { key: "round", label: "轮次", opts: uniq(m.videos.map((v) => v.round)).sort() },
+  ];
+}
+
+function renderFilters(m) {
+  $("filters").innerHTML = filterDefs(m).map((fd) => {
+    const chips = ["all", ...fd.opts].map((opt) => {
+      const text = opt === "all" ? "全部" : (fd.key === "outcome" ? OUTCOME_TEXT[opt] : opt);
+      return `<button class="chip${state[fd.key] === opt ? " on" : ""}" data-key="${fd.key}" data-val="${esc(opt)}">${esc(text)}</button>`;
+    }).join("");
+    return `<div class="filter-row"><span class="filter-label">${fd.label}</span>${chips}</div>`;
+  }).join("");
+  $("filters").querySelectorAll(".chip").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state[btn.dataset.key] = btn.dataset.val;
+      renderFilters(m); renderGrid(m);
+    });
+  });
+}
+
+const vMatch = (v) =>
+  (state.model === "all" || v.model === state.model) &&
+  (state.test === "all" || v.test === state.test) &&
+  (state.outcome === "all" || v.outcome === state.outcome) &&
+  (state.round === "all" || v.round === state.round);
+
+function videoCard(v) {
+  const ok = v.outcome === "success";
+  return `<div class="vcard">
+    <video preload="none" controls src="${esc(v.rel_path)}"></video>
+    <div class="vbody">
+      <div class="vtitle">
+        <span class="model-tag m-${esc(v.model)}">${esc(v.model)}</span>
+        ${esc(v.test)} · t${String(v.trial).padStart(2, "0")}
+        <span class="badge ${ok ? "ok" : "fail"}">${ok ? "成功" : "失败"}</span>
+        <span class="badge round">${esc(v.round)}</span>
+      </div>
+      <div class="vsub">${esc(v.subtitle || v.label)}</div>
+    </div>
+  </div>`;
+}
+
+function renderGrid(m) {
+  const shown = m.videos.filter(vMatch);
+  $("videoCount").textContent =
+    `共 ${m.videos.length} 个视频，当前筛选 ${shown.length} 个` +
+    `（成功 ${shown.filter((v) => v.outcome === "success").length} / 失败 ${shown.filter((v) => v.outcome === "fail").length}）`;
+  $("vgrid").innerHTML = shown.map(videoCard).join("");
+}
+
+/* ---------- anchor highlight ---------- */
+function setupAnchors() {
+  const links = [...document.querySelectorAll("#anchors a")];
+  const secs = links.map((a) => document.querySelector(a.getAttribute("href")));
+  const onScroll = () => {
+    const y = window.scrollY + 140;
+    let active = 0;
+    secs.forEach((s, i) => { if (s && s.offsetTop <= y) active = i; });
+    links.forEach((a, i) => a.classList.toggle("active", i === active));
+  };
+  window.addEventListener("scroll", onScroll, { passive: true });
+  onScroll();
+}
+
+/* ================= render console ================= */
+const SLIDER_DEFS = {
+  squat: [
+    { name: "height", label: "蹲深（目标 base 高度）", unit: "m", min: 0.20, max: 0.70, step: 0.01, def: 0.45 },
+    { name: "rate", label: "下蹲速度（高度斜坡）", unit: "m/s", min: 0.05, max: 0.80, step: 0.01, def: 0.20 },
+  ],
+  walk: [
+    { name: "vx", label: "行走速度 vx", unit: "m/s", min: 0.20, max: 1.20, step: 0.05, def: 1.00 },
+  ],
+  circle: [
+    { name: "vx", label: "切向速度 vx", unit: "m/s", min: 0.20, max: 1.20, step: 0.05, def: 0.40 },
+    { name: "wz", label: "转向角速度 wz（半径 = vx / wz）", unit: "rad/s", min: 0.10, max: 0.60, step: 0.01, def: 0.40 },
+  ],
+};
+const rcState = { model: "homie", kind: "squat" };
+let pollTimer = null;
+
+function setupSeg(id, key, after) {
+  $(id).querySelectorAll("button").forEach((b) => {
+    b.addEventListener("click", () => {
+      $(id).querySelectorAll("button").forEach((x) => x.classList.toggle("on", x === b));
+      rcState[key] = b.dataset.v;
+      if (after) after();
+    });
+  });
+}
+
+function renderSliders() {
+  const defs = SLIDER_DEFS[rcState.kind];
+  $("sliders").innerHTML = defs.map((d) => `
+    <div class="slider-row">
+      <div class="slider-head"><span>${esc(d.label)}</span>
+        <span class="val" id="val_${d.name}">${d.def.toFixed(2)} ${d.unit}</span></div>
+      <input type="range" id="sl_${d.name}" min="${d.min}" max="${d.max}" step="${d.step}" value="${d.def}">
+      <div class="slider-minmax"><span>${d.min.toFixed(2)}</span><span>${d.max.toFixed(2)}</span></div>
+    </div>`).join("");
+  defs.forEach((d) => {
+    $("sl_" + d.name).addEventListener("input", (e) => {
+      $("val_" + d.name).textContent = `${Number(e.target.value).toFixed(2)} ${d.unit}`;
+    });
+  });
+}
+
+function fmtParams(p) {
+  const bits = [];
+  if (p.height != null) bits.push(`H=${p.height}m`);
+  if (p.rate != null) bits.push(`rate=${p.rate}m/s`);
+  if (p.vx != null) bits.push(`vx=${p.vx}m/s`);
+  if (p.wz != null) bits.push(`wz=${p.wz}rad/s`);
+  return bits.join(" · ");
+}
+const KIND_TEXT = { squat: "蹲起", walk: "行走", circle: "绕柱" };
+
+function showJobStatus(job, extraMsg) {
+  const el = $("jobStatus");
+  el.classList.remove("hidden");
+  let icon = '<span class="spinner"></span>';
+  let text = "";
+  if (!job) { text = extraMsg || "提交中…"; }
+  else if (job.status === "queued") text = `排队中 · 任务 ${job.id}`;
+  else if (job.status === "running") {
+    const dt = job.started ? Math.round(Date.now() / 1000 - job.started) : 0;
+    text = `渲染中 · ${KIND_TEXT[job.params.kind]} · ${job.params.model.toUpperCase()} · 已运行 ${dt}s`;
+  } else if (job.status === "done") {
+    icon = '<span class="st-dot st-done"></span>'; text = `完成 · 任务 ${job.id}`;
+  } else { icon = '<span class="st-dot st-failed"></span>'; text = `失败 · 任务 ${job.id}`; }
+  let html = `<div class="js-line">${icon}<span>${esc(text)}</span></div>`;
+  if (job && job.params) html += `<div class="hist-params" style="margin-top:6px">${esc(fmtParams(job.params))}</div>`;
+  if (job && job.error) html += `<div class="err-text">${esc(job.error)}</div>`;
+  if (job && job.log_tail && job.log_tail.length && job.status !== "done") {
+    html += `<pre class="logtail">${esc(job.log_tail.slice(-12).join("\n"))}</pre>`;
+  }
+  if (job && job.status === "done" && job.videos.length) {
+    html += `<div class="hist-videos">` + job.videos.map((v) =>
+      `<video preload="metadata" controls src="${esc(v.rel_path)}"></video>`).join("") + `</div>`;
+  }
+  el.innerHTML = html;
+}
+
+async function pollJob(jobId) {
+  try {
+    const r = await fetch("api/job/" + jobId, { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const job = await r.json();
+    showJobStatus(job);
+    if (job.status === "done" || job.status === "failed") {
+      clearInterval(pollTimer); pollTimer = null;
+      $("submitBtn").disabled = false;
+      loadHistory();
+      return;
+    }
+  } catch (e) {
+    showJobStatus(null, "轮询失败: " + e.message);
+  }
+}
+
+async function submitRender() {
+  const body = { model: rcState.model, kind: rcState.kind };
+  SLIDER_DEFS[rcState.kind].forEach((d) => { body[d.name] = Number($("sl_" + d.name).value); });
+  $("submitBtn").disabled = true;
+  showJobStatus(null, "提交中…");
+  try {
+    const r = await fetch("api/render", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const res = await r.json();
+    if (!r.ok) throw new Error(res.error || ("HTTP " + r.status));
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(() => pollJob(res.job_id), 3000);
+    pollJob(res.job_id);
+    loadHistory();
+  } catch (e) {
+    $("submitBtn").disabled = false;
+    showJobStatus({ status: "failed", id: "-", error: e.message, params: body, videos: [] });
+  }
+}
+
+function histItem(j) {
+  const st = j.status === "done" ? '<span class="badge ok">完成</span>'
+    : j.status === "failed" ? '<span class="badge fail">失败</span>'
+    : `<span class="badge round">${esc(j.status)}</span>`;
+  const t = new Date(j.created * 1000);
+  const pad = (n) => String(n).padStart(2, "0");
+  const ts = `${pad(t.getMonth() + 1)}-${pad(t.getDate())} ${pad(t.getHours())}:${pad(t.getMinutes())}`;
+  const dur = (j.started && j.finished) ? ` · ${Math.round(j.finished - j.started)}s` : "";
+  let html = `<div class="hist-item">
+    <div class="hist-head">
+      <span class="model-tag m-${esc(j.params.model.toUpperCase())}">${esc(j.params.model.toUpperCase())}</span>
+      <b>${KIND_TEXT[j.params.kind] || esc(j.params.kind)}</b>
+      <span class="hist-params">${esc(fmtParams(j.params))}</span>
+      ${st}<span class="hist-time">${ts}${dur}</span>
+    </div>`;
+  if (j.error) html += `<div class="err-text">${esc(j.error)}</div>`;
+  if (j.videos && j.videos.length) {
+    html += `<div class="hist-videos">` + j.videos.map((v) =>
+      `<video preload="none" controls src="${esc(v.rel_path)}"></video>`).join("") + `</div>`;
+  }
+  return html + `</div>`;
+}
+
+async function loadHistory() {
+  try {
+    const r = await fetch("api/jobs", { cache: "no-store" });
+    if (!r.ok) return;
+    const { jobs } = await r.json();
+    $("history").innerHTML = jobs.length
+      ? jobs.slice(0, 20).map(histItem).join("")
+      : '<p class="hist-empty">暂无历史任务</p>';
+  } catch (e) { /* server without API (static preview): keep placeholder */ }
+}
+
+/* ================= boot ================= */
+function showError(err) {
+  $("expTables").innerHTML = `<div class="error-box">
+    无法加载 <code>manifest.json</code>：${esc(err.message || err)}<br>
+    请通过 server.py 同源访问（不要用 file:// 直接打开）：
+    <code>python3 server.py --port 8017 --root /sda/lizhe/g1bench/site</code></div>`;
+  $("heroStats").textContent = "manifest 加载失败";
+}
+
+fetch("manifest.json", { cache: "no-store" })
+  .then((r) => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+  .then((m) => {
+    MANIFEST = m;
+    renderHero(m); renderGoals(m); renderProtocol(m);
+    renderTables(m); renderFilters(m); renderGrid(m);
+    renderCommands(m);
+    setupAnchors();
+  })
+  .catch(showError);
+
+setupSeg("segModel", "model");
+setupSeg("segKind", "kind", renderSliders);
+renderSliders();
+$("submitBtn").addEventListener("click", submitRender);
+loadHistory();
+setInterval(loadHistory, 30000);
+</script>
+</body>
+</html>

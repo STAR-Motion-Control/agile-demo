@@ -1,0 +1,110 @@
+walk_speed --test walk_speed
+squat_box --test squat_box
+circle_pillar --test circle_pillar
+speed_sweep --test speed_sweep
+walk_speed_psi0 --test walk_speed_psi0 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+squat_box_psi0 --test squat_box_psi0 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_sim_ep035.npz
+circle_pillar_psi0 --test circle_pillar_psi0 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+squat_sweep --test squat_sweep
+goto_ab --test goto_ab
+pipeline_abc --test pipeline_abc
+arena/agile-deepsquat/arena_M1/v00 --test arena_M1 --variant 0 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v01 --test arena_M1 --variant 1 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v02 --test arena_M1 --variant 2 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v03 --test arena_M1 --variant 3 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v04 --test arena_M1 --variant 4 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v05 --test arena_M1 --variant 5 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v06 --test arena_M1 --variant 6 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v07 --test arena_M1 --variant 7 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v08 --test arena_M1 --variant 8 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v09 --test arena_M1 --variant 9 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v10 --test arena_M1 --variant 10 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v11 --test arena_M1 --variant 11 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v12 --test arena_M1 --variant 12 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v13 --test arena_M1 --variant 13 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v14 --test arena_M1 --variant 14 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v15 --test arena_M1 --variant 15 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v16 --test arena_M1 --variant 16 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v17 --test arena_M1 --variant 17 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v18 --test arena_M1 --variant 18 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v19 --test arena_M1 --variant 19 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v20 --test arena_M1 --variant 20 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v21 --test arena_M1 --variant 21 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v22 --test arena_M1 --variant 22 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v23 --test arena_M1 --variant 23 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v24 --test arena_M1 --variant 24 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v25 --test arena_M1 --variant 25 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v26 --test arena_M1 --variant 26 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v27 --test arena_M1 --variant 27 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v28 --test arena_M1 --variant 28 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v29 --test arena_M1 --variant 29 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v30 --test arena_M1 --variant 30 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v31 --test arena_M1 --variant 31 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v32 --test arena_M1 --variant 32 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v33 --test arena_M1 --variant 33 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v34 --test arena_M1 --variant 34 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v35 --test arena_M1 --variant 35 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v36 --test arena_M1 --variant 36 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v37 --test arena_M1 --variant 37 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v38 --test arena_M1 --variant 38 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v39 --test arena_M1 --variant 39 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v40 --test arena_M1 --variant 40 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v41 --test arena_M1 --variant 41 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v42 --test arena_M1 --variant 42 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v43 --test arena_M1 --variant 43 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v44 --test arena_M1 --variant 44 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v45 --test arena_M1 --variant 45 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v46 --test arena_M1 --variant 46 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v47 --test arena_M1 --variant 47 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v48 --test arena_M1 --variant 48 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M1/v49 --test arena_M1 --variant 49 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v00 --test arena_M2 --variant 0 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v01 --test arena_M2 --variant 1 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v02 --test arena_M2 --variant 2 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v03 --test arena_M2 --variant 3 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v04 --test arena_M2 --variant 4 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v05 --test arena_M2 --variant 5 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v06 --test arena_M2 --variant 6 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v07 --test arena_M2 --variant 7 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v08 --test arena_M2 --variant 8 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v09 --test arena_M2 --variant 9 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v10 --test arena_M2 --variant 10 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v11 --test arena_M2 --variant 11 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v12 --test arena_M2 --variant 12 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v13 --test arena_M2 --variant 13 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v14 --test arena_M2 --variant 14 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v15 --test arena_M2 --variant 15 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v16 --test arena_M2 --variant 16 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v17 --test arena_M2 --variant 17 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v18 --test arena_M2 --variant 18 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v19 --test arena_M2 --variant 19 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v20 --test arena_M2 --variant 20 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v21 --test arena_M2 --variant 21 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v22 --test arena_M2 --variant 22 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v23 --test arena_M2 --variant 23 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v24 --test arena_M2 --variant 24 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v25 --test arena_M2 --variant 25 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v26 --test arena_M2 --variant 26 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v27 --test arena_M2 --variant 27 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v28 --test arena_M2 --variant 28 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v29 --test arena_M2 --variant 29 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v30 --test arena_M2 --variant 30 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v31 --test arena_M2 --variant 31 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v32 --test arena_M2 --variant 32 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v33 --test arena_M2 --variant 33 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v34 --test arena_M2 --variant 34 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v35 --test arena_M2 --variant 35 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v36 --test arena_M2 --variant 36 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v37 --test arena_M2 --variant 37 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v38 --test arena_M2 --variant 38 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v39 --test arena_M2 --variant 39 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v40 --test arena_M2 --variant 40 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v41 --test arena_M2 --variant 41 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v42 --test arena_M2 --variant 42 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v43 --test arena_M2 --variant 43 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v44 --test arena_M2 --variant 44 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v45 --test arena_M2 --variant 45 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v46 --test arena_M2 --variant 46 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v47 --test arena_M2 --variant 47 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v48 --test arena_M2 --variant 48 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
+arena/agile-deepsquat/arena_M2/v49 --test arena_M2 --variant 49 --trials 1 --upper-replay /sda/lizhe/g1bench/psi0_replay/out/upper_replay_agile29_real_ep053.npz
