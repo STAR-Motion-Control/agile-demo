@@ -1,0 +1,38 @@
+diff --git a/decoupled_wbc/control/envs/g1/utils/state_processor.py b/decoupled_wbc/control/envs/g1/utils/state_processor.py
+index f8c0548..dfdfb5c 100644
+--- a/decoupled_wbc/control/envs/g1/utils/state_processor.py
++++ b/decoupled_wbc/control/envs/g1/utils/state_processor.py
+@@ -24,12 +24,30 @@ class BodyStateProcessor:
+             msc.SetTimeout(5.0)
+             msc.Init()
+ 
+-            status, result = msc.CheckMode()
++            try:
++                status, result = msc.CheckMode()
++            except Exception as exc:
++                print(f"[motion] CheckMode failed: {exc}; continue with low-state subscribers")
++                status, result = None, None
+             print(status, result)
+-            while result["name"]:
++
++            def _motion_name(value):
++                if isinstance(value, dict):
++                    return str(value.get("name", "") or "")
++                return str(getattr(value, "name", "") or "")
++
++            name = _motion_name(result)
++            if result is None:
++                print("[motion] CheckMode returned None; skip ReleaseMode and continue")
++            while name:
+                 msc.ReleaseMode()
+-                status, result = msc.CheckMode()
++                try:
++                    status, result = msc.CheckMode()
++                except Exception as exc:
++                    print(f"[motion] CheckMode failed after ReleaseMode: {exc}; continue")
++                    break
+                 print(status, result)
++                name = _motion_name(result)
+                 time.sleep(1)
+ 
+         if self.config["ROBOT_TYPE"] == "h1" or self.config["ROBOT_TYPE"] == "go2":
