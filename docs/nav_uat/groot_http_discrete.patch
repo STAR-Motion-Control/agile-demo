@@ -1,0 +1,523 @@
+diff --git a/README_ROS.md b/README_ROS.md
+index 04a6e10..591cf9b 100644
+--- a/README_ROS.md
++++ b/README_ROS.md
+@@ -77,6 +77,7 @@ Notes:
+ - Topic (subscribe): `/nav/stop_cmd` (`std_msgs/msg/Empty`)
+ - Topic (subscribe): `/nav/forward_cmd` (`geometry_msgs/msg/Twist`)
+ - Topic (subscribe): `/nav/rotate_cmd` (`geometry_msgs/msg/Twist`)
++- Topic (subscribe): `/nav/relative_cmd` (`std_msgs/msg/String`, JSON)
+ - Topic (subscribe): `/safety/lidar_state` (`std_msgs/msg/String`, `clear | blocked | stale`)
+ - Topic (publish): `/nav/status` (`std_msgs/msg/String`, JSON string)
+ - Service: `/nav/get_pose` (`std_srvs/srv/Trigger`)
+@@ -177,6 +178,38 @@ Right turn example:
+ ros2 topic pub --once /nav/rotate_cmd geometry_msgs/msg/Twist "{angular: {x: 0.0, y: 0.0, z: -1.57}}"
+ ```
+ 
++### 6.4 Relative distance + direction test
++
++Use `/nav/relative_cmd` for the first GR00T-WBC integration test. The bridge
++rotates by `direction_deg` first, then moves forward by `distance_m`.
++Positive direction is left / counter-clockwise.
++
++```bash
++ros2 topic pub --once /nav/relative_cmd std_msgs/msg/String \
++  "{data: '{\"distance_m\": 0.1, \"direction_deg\": 10}'}"
++```
++
++Plain text is also accepted:
++
++```bash
++ros2 topic pub --once /nav/relative_cmd std_msgs/msg/String "{data: '0.1 10'}"
++```
++
++### 6.5 Motion backend
++
++`src/config.yaml` selects the lower-body backend:
++
++```yaml
++motion_backend:
++  type: groot_http_discrete
++  ipc_url: http://192.168.123.222:5001
++  box_demo_module_path: /home/unitree/zihou/box_demo_2
++```
++
++`groot_http_discrete` calls the 5080 HTTP bridge and reuses
++`RemoteMover/GrootMover` for distance/angle moves. Set `type:
++wireless_controller` to roll back to the original `/wirelesscontroller` path.
++
+ ## 7) Check robot status
+ 
+ Bridge status (JSON string):
+diff --git a/src/Node/__init__.py b/src/Node/__init__.py
+index 4fc05c5..4c2547c 100644
+--- a/src/Node/__init__.py
++++ b/src/Node/__init__.py
+@@ -24,7 +24,7 @@ class NodeManager:
+         rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
+         self.executor = MultiThreadedExecutor()
+         
+-        self.step_control_client = StepControlClient()
++        self.step_control_client = StepControlClient(cfg=cfg)
+         self.localization_client = LocalizationClient(cfg, visualization=visualization)
+         self.action_planner = ActionPlanner(cfg, img, origin, resolution, visualization=visualization)
+         self.action_excutor = ActionExecutorClient(cfg=cfg, visualization=visualization)
+diff --git a/src/Node/action_executor.py b/src/Node/action_executor.py
+index ce37bb6..2d81ec3 100644
+--- a/src/Node/action_executor.py
++++ b/src/Node/action_executor.py
+@@ -10,6 +10,7 @@ from unitree_go.msg._wireless_controller import WirelessController
+ from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+ import logging
+ from visualization.adapters import ExecutorVisualizationAdapter
++from .motion_backend import GrootHttpDiscreteBackend
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -22,8 +23,13 @@ class ActionExecutorClient(Node):
+         self.cfg = cfg
+         self.viz = ExecutorVisualizationAdapter(visualization=visualization)
+         self.subscriber = self.create_subscription(Path, '/planned_action', self._action_callback, qos_profile_sensor_data)
+-        self.publisher = self.create_publisher(
+-            WirelessController, '/wirelesscontroller', 10)
++        self.motion_backend = GrootHttpDiscreteBackend(cfg, log=logger)
++        self.publisher = None
++        if not self.motion_backend.enabled:
++            self.publisher = self.create_publisher(
++                WirelessController, '/wirelesscontroller', 10)
++        else:
++            logger.info("Action executor uses GR00T HTTP discrete backend.")
+         self.motion_control = self._load_motion_control_config(cfg)
+         self.pose_lock = Lock()
+         self.current_pose = None
+@@ -214,6 +220,8 @@ class ActionExecutorClient(Node):
+         }
+ 
+     def _closed_loop_enabled(self):
++        if self.motion_backend.enabled:
++            return False
+         return bool(self.motion_control.get("enable", True))
+ 
+     def _shutdown_requested(self):
+@@ -390,6 +398,9 @@ class ActionExecutorClient(Node):
+         return msg
+ 
+     def _publish_motion(self, msg):
++        if self.motion_backend.enabled:
++            logger.warning("Ignoring continuous WirelessController command in GR00T backend mode.")
++            return False
+         try:
+             self.publisher.publish(msg)
+             return True
+@@ -401,6 +412,9 @@ class ActionExecutorClient(Node):
+             return False
+ 
+     def _publish_zero_motion(self, repeat=1, interval=0.02):
++        if self.motion_backend.enabled:
++            success, _, _ = self.motion_backend.stop()
++            return success
+         ok = True
+         repeat = max(1, int(repeat))
+         for index in range(repeat):
+@@ -685,6 +699,8 @@ class ActionExecutorClient(Node):
+         return False
+ 
+     def _resolve_final_goal(self, final_goal):
++        if self.motion_backend.enabled:
++            return "validated" if self._validate_final_goal(final_goal) else "replan"
+         result = self._run_closed_loop_final_pose(final_goal)
+         if result is True:
+             return "validated"
+@@ -1417,6 +1433,11 @@ class ActionExecutorClient(Node):
+             self.thread.join(timeout=timeout_sec)
+ 
+     def forward(self, distance = 1.0, speed = 1.0, near_goal=False):
++        if self.motion_backend.enabled:
++            if self._stop_flag.is_set() or self._shutdown_requested():
++                return False, 'stopped.', -2
++            return self.motion_backend.forward(float(distance))
++
+         closed_loop_result = self._run_closed_loop_forward(distance, speed, near_goal=near_goal)
+         if closed_loop_result is True:
+             return True, 'success.', 1
+@@ -1455,6 +1476,11 @@ class ActionExecutorClient(Node):
+         return result_holder['success_flag'], result_holder['msg'], result_holder['code']
+     
+     def shift(self, distance = 1.0, speed = 0.5):
++        if self.motion_backend.enabled:
++            if self._stop_flag.is_set() or self._shutdown_requested():
++                return False, 'stopped.', -2
++            return self.motion_backend.shift(float(distance))
++
+         msg = WirelessController()
+         msg.lx = -speed if distance > 0 else speed
+         msg.ly = 0.0 
+@@ -1482,6 +1508,11 @@ class ActionExecutorClient(Node):
+         return result_holder['success_flag'], result_holder['msg'], result_holder['code']
+     
+     def rotate(self, angle = math.pi/2, speed = math.pi/2, near_goal=False):
++        if self.motion_backend.enabled:
++            if self._stop_flag.is_set() or self._shutdown_requested():
++                return False, 'stopped.', -2
++            return self.motion_backend.rotate(float(angle))
++
+         closed_loop_result = self._run_closed_loop_rotate(angle, speed, near_goal=near_goal)
+         if closed_loop_result is True:
+             return True, 'success.', 1
+diff --git a/src/Node/step_control.py b/src/Node/step_control.py
+index 4d4c437..33f915f 100644
+--- a/src/Node/step_control.py
++++ b/src/Node/step_control.py
+@@ -3,15 +3,21 @@ from threading import Event
+ import math, time
+ import rclpy
+ from unitree_go.msg._wireless_controller import WirelessController
++from .motion_backend import GrootHttpDiscreteBackend
+ 
+ 
+ class StepControlClient(Node):
+-    def __init__(self):
++    def __init__(self, cfg=None):
+         super().__init__('step_control_client')
+         self.get_logger().info("StepControl client initialized...")
+ 
+-        self.publisher = self.create_publisher(
+-            WirelessController, '/wirelesscontroller', 10)
++        self.motion_backend = GrootHttpDiscreteBackend(cfg, log=self.get_logger())
++        self.publisher = None
++        if not self.motion_backend.enabled:
++            self.publisher = self.create_publisher(
++                WirelessController, '/wirelesscontroller', 10)
++        else:
++            self.get_logger().info("StepControl uses GR00T HTTP discrete backend.")
+ 
+         self.get_logger().info("StepControl client launched...")
+         
+@@ -39,6 +45,9 @@ class StepControlClient(Node):
+         return msg
+ 
+     def _publish_motion(self, msg):
++        if self.motion_backend.enabled:
++            self.get_logger().warning("Ignoring continuous WirelessController command in GR00T backend mode.")
++            return False
+         if not rclpy.ok():
+             return False
+         try:
+@@ -52,6 +61,9 @@ class StepControlClient(Node):
+             return False
+ 
+     def _publish_zero_motion(self, repeat=1, interval=0.02):
++        if self.motion_backend.enabled:
++            success, _, _ = self.motion_backend.stop()
++            return success
+         ok = True
+         repeat = max(1, int(repeat))
+         for index in range(repeat):
+@@ -63,10 +75,16 @@ class StepControlClient(Node):
+ 
+     def stop(self):
+         self._stop_flag.set()
++        if self.motion_backend.enabled:
++            return self.motion_backend.stop()
+         self._publish_zero_motion(repeat=5)
+         return True, 'success.', 'stop success.'
+ 
+     def forward(self, distance = 1.0, speed = 1.0):
++        if self.motion_backend.enabled:
++            self._stop_flag.clear()
++            return self.motion_backend.forward(float(distance))
++
+         distance = distance*2.5
+         self._stop_flag.clear()
+         msg = WirelessController()
+@@ -102,6 +120,10 @@ class StepControlClient(Node):
+             }
+         return result_holder['success_flag'], result_holder['msg'], result_holder['code']
+     def shift(self, distance = 1.0, speed = 0.3):
++        if self.motion_backend.enabled:
++            self._stop_flag.clear()
++            return self.motion_backend.shift(float(distance))
++
+         self._stop_flag.clear()
+         msg = WirelessController()
+         msg.lx = -speed if distance > 0 else speed
+@@ -138,6 +160,10 @@ class StepControlClient(Node):
+         return result_holder['success_flag'], result_holder['msg'], result_holder['code']
+     
+     def rotate(self, angle = math.pi/2, speed = math.pi/2):
++        if self.motion_backend.enabled:
++            self._stop_flag.clear()
++            return self.motion_backend.rotate(float(angle))
++
+         self._stop_flag.clear()
+         msg = WirelessController()
+         msg.lx = 0.0
+diff --git a/src/config.yaml b/src/config.yaml
+index c41eb04..280949c 100644
+--- a/src/config.yaml
++++ b/src/config.yaml
+@@ -47,6 +47,26 @@ lidar_safety:
+   enable: true
+   state_topic: /safety/lidar_state
+ 
++motion_backend:
++  # Current deployment uses the GR00T-WBC lower-body HTTP bridge.
++  # Roll back by setting this to wireless_controller.
++  type: groot_http_discrete
++  ipc_url: http://192.168.123.222:5001
++  box_demo_module_path: /home/unitree/zihou/box_demo_2
++  initialize_before_motion: true
++  http_timeout: 2.0
++  stand_height: 0.74
++  min_duration: 1.5
++  min_distance: 0.08
++  warmup_time: 0.6
++  warmup_speed: 0.15
++  settle_before_s: 0.0
++  stop_hold_s: 0.4
++  walk_min_height: 0.72
++  auto_raise_for_walk: false
++  dist_gain: 1.0
++  verbose: true
++
+ motion_control:
+   closed_loop:
+     enable: true
+diff --git a/src/run_ros.py b/src/run_ros.py
+index ccbabc7..983102b 100644
+--- a/src/run_ros.py
++++ b/src/run_ros.py
+@@ -275,6 +275,7 @@ class NavRosBridge(Node):
+         self.create_subscription(Empty, "/nav/stop_cmd", self._on_stop_cmd, 10)
+         self.create_subscription(Twist, "/nav/forward_cmd", self._on_forward_cmd, 10)
+         self.create_subscription(Twist, "/nav/rotate_cmd", self._on_rotate_cmd, 10)
++        self.create_subscription(String, "/nav/relative_cmd", self._on_relative_cmd, 10)
+         if self.lidar_safety_enabled:
+             self.create_subscription(String, self.lidar_safety_topic, self._on_lidar_state, 10)
+         self.create_service(Trigger, "/nav/get_pose", self._on_get_pose)
+@@ -456,6 +457,77 @@ class NavRosBridge(Node):
+             state=self.task_service.normalize_state(state),
+         )
+ 
++    @staticmethod
++    def _parse_relative_cmd_payload(raw):
++        raw = str(raw or "").strip()
++        if not raw:
++            raise ValueError("relative command payload is empty")
++        try:
++            payload = json.loads(raw)
++            return float(payload["distance_m"]), float(payload["direction_deg"])
++        except json.JSONDecodeError:
++            parts = raw.replace(",", " ").split()
++            if len(parts) != 2:
++                raise ValueError("expected JSON with distance_m/direction_deg or '<distance_m> <direction_deg>'")
++            return float(parts[0]), float(parts[1])
++
++    def _on_relative_cmd(self, msg):
++        if self.task_service.is_busy():
++            self.task_service.record_command_rejection(
++                "Navigation task is running, relative move rejected",
++                state=-3,
++            )
++            return
++        if self._reject_manual_move_if_lidar_paused():
++            return
++
++        try:
++            distance_m, direction_deg = self._parse_relative_cmd_payload(msg.data)
++        except Exception as exc:
++            self.task_service.set_terminal_status(
++                "failed",
++                success_flag=False,
++                message=f"Invalid relative command: {exc}",
++                state=-2,
++            )
++            return
++
++        theta = math.radians(direction_deg)
++        if math.isclose(distance_m, 0.0, abs_tol=1e-6) and math.isclose(theta, 0.0, abs_tol=1e-6):
++            self.task_service.set_terminal_status(
++                "failed",
++                success_flag=False,
++                message="distance_m and direction_deg are both zero",
++                state=-2,
++            )
++            return
++
++        if not math.isclose(theta, 0.0, abs_tol=1e-6):
++            success_flag, info, state = self.node_manager.rotate(theta)
++            if not success_flag:
++                self.task_service.set_terminal_status(
++                    "failed",
++                    success_flag=False,
++                    message=f"relative rotate failed: {info}",
++                    state=self.task_service.normalize_state(state),
++                )
++                return
++
++        if not math.isclose(distance_m, 0.0, abs_tol=1e-6):
++            success_flag, info, state = self.node_manager.forward(distance_m)
++        else:
++            success_flag, info, state = True, "success.", 1
++
++        self.task_service.set_terminal_status(
++            "completed" if success_flag else "failed",
++            success_flag=bool(success_flag),
++            message=(
++                f"relative move distance_m={distance_m:.3f}, "
++                f"direction_deg={direction_deg:.1f}: {info}"
++            ),
++            state=self.task_service.normalize_state(state),
++        )
++
+     def _on_get_pose(self, _request, response):
+         pose = self.node_manager.get_position()
+         if pose is None:
+diff --git a/src/Node/motion_backend.py b/src/Node/motion_backend.py
+new file mode 100644
+index 0000000..f680307
+--- /dev/null
++++ b/src/Node/motion_backend.py
+@@ -0,0 +1,142 @@
++import logging
++import os
++import sys
++from typing import Any
++
++
++logger = logging.getLogger(__name__)
++
++
++def config_get(config: Any, key: str, default: Any = None) -> Any:
++    if config is None:
++        return default
++    if hasattr(config, "get") and callable(config.get):
++        return config.get(key, default)
++    return getattr(config, key, default)
++
++
++class GrootHttpDiscreteBackend:
++    """Distance/angle motion backend backed by box_demo_2 RemoteMover.
++
++    This deliberately exposes only discrete moves. Navigation continues to
++    plan in rotate(theta) + forward(distance); the GR00T adapter converts those
++    requests to timed velocity holds through the existing HTTP IPC bridge.
++    """
++
++    def __init__(self, cfg: Any, log=None):
++        backend_cfg = config_get(cfg, "motion_backend", None)
++        self.backend_type = str(config_get(backend_cfg, "type", "wireless_controller"))
++        self.enabled = self.backend_type == "groot_http_discrete"
++        self.log = log or logger
++        self._mover = None
++        self._initialized = False
++        self._initialize_before_motion = bool(config_get(backend_cfg, "initialize_before_motion", True))
++
++        if not self.enabled:
++            return
++
++        module_path = os.path.expanduser(
++            str(config_get(backend_cfg, "box_demo_module_path", "/home/unitree/zihou/box_demo_2"))
++        )
++        ipc_url = str(config_get(backend_cfg, "ipc_url", "http://192.168.123.222:5001")).rstrip("/")
++        timeout = float(config_get(backend_cfg, "http_timeout", 2.0))
++
++        if module_path and module_path not in sys.path:
++            sys.path.insert(0, module_path)
++
++        try:
++            from remote_mover import RemoteMover
++        except Exception as exc:
++            raise RuntimeError(
++                f"Cannot import RemoteMover from {module_path!r}; "
++                "check motion_backend.box_demo_module_path"
++            ) from exc
++
++        class StrictRemoteMover(RemoteMover):
++            def _get(self, path: str, **params):
++                response = self._session.get(
++                    f"{self.ipc_url}{path}",
++                    params=params,
++                    timeout=self._timeout,
++                )
++                response.raise_for_status()
++                return response.json()
++
++        mover_kwargs = {
++            "min_duration": float(config_get(backend_cfg, "min_duration", 1.5)),
++            "min_distance": float(config_get(backend_cfg, "min_distance", 0.08)),
++            "warmup_time": float(config_get(backend_cfg, "warmup_time", 0.6)),
++            "warmup_speed": float(config_get(backend_cfg, "warmup_speed", 0.15)),
++            "settle_before_s": float(config_get(backend_cfg, "settle_before_s", 0.0)),
++            "stop_hold_s": float(config_get(backend_cfg, "stop_hold_s", 0.4)),
++            "stand_height": float(config_get(backend_cfg, "stand_height", 0.74)),
++            "walk_min_height": float(config_get(backend_cfg, "walk_min_height", 0.72)),
++            "auto_raise_for_walk": bool(config_get(backend_cfg, "auto_raise_for_walk", False)),
++            "dist_gain": float(config_get(backend_cfg, "dist_gain", 1.0)),
++            "verbose": bool(config_get(backend_cfg, "verbose", True)),
++        }
++        self._mover = StrictRemoteMover(ipc_url, timeout=timeout, **mover_kwargs)
++        self.log.info("Using GR00T HTTP discrete motion backend at %s", ipc_url)
++
++    def _ensure_ready(self):
++        if not self.enabled or self._mover is None:
++            return
++        if self._initialize_before_motion and not self._initialized:
++            self._mover.initialize()
++            self._initialized = True
++
++    def _result(self, success: bool, message: str, code: int):
++        return bool(success), str(message), int(code)
++
++    def forward(self, distance_m: float):
++        if not self.enabled:
++            return self._result(False, "GR00T backend is disabled.", -1)
++        try:
++            if abs(float(distance_m)) < 1e-6:
++                return self._result(True, "zero forward distance skipped.", 1)
++            self._ensure_ready()
++            self._mover.move_forward(float(distance_m))
++            return self._result(True, "success.", 1)
++        except Exception as exc:
++            self.log.warning("GR00T forward failed: %s", exc)
++            return self._result(False, f"GR00T forward failed: {exc}", -1)
++
++    def shift(self, distance_m: float):
++        if not self.enabled:
++            return self._result(False, "GR00T backend is disabled.", -1)
++        try:
++            if abs(float(distance_m)) < 1e-6:
++                return self._result(True, "zero lateral distance skipped.", 1)
++            self._ensure_ready()
++            self._mover.move_left(float(distance_m))
++            return self._result(True, "success.", 1)
++        except Exception as exc:
++            self.log.warning("GR00T lateral move failed: %s", exc)
++            return self._result(False, f"GR00T lateral move failed: {exc}", -1)
++
++    def rotate(self, angle_rad: float):
++        if not self.enabled:
++            return self._result(False, "GR00T backend is disabled.", -1)
++        try:
++            if abs(float(angle_rad)) < 1e-6:
++                return self._result(True, "zero rotation skipped.", 1)
++            self._ensure_ready()
++            self._mover.rotate(float(angle_rad))
++            return self._result(True, "success.", 1)
++        except Exception as exc:
++            self.log.warning("GR00T rotate failed: %s", exc)
++            return self._result(False, f"GR00T rotate failed: {exc}", -1)
++
++    def stop(self):
++        if not self.enabled:
++            return self._result(False, "GR00T backend is disabled.", -1)
++        try:
++            if self._mover is not None:
++                self._mover.stop()
++            return self._result(True, "success.", 1)
++        except Exception as exc:
++            self.log.warning("GR00T stop failed: %s", exc)
++            return self._result(False, f"GR00T stop failed: {exc}", -1)
++
++    def shutdown(self):
++        return self.stop()
