@@ -1,0 +1,64 @@
+# GR00T-WBC + nav_uat 导航合并测试指引
+
+当前 G001 测试使用 **本体运行拓扑**：导航、HTTP IPC bridge、GR00T adapter、merger
+全部运行在机器人本体，不再经过 5080。
+
+详细步骤见同目录：
+
+```text
+NAV_ONBOARD_TEST_GUIDE.md
+```
+
+## 核心启动顺序
+
+1. 确认没有旧控制进程：
+
+```bash
+pgrep -af "merge_lowcmd_arm_sdk.py|groot_wbc_boxdemo_adapter.py|agile_lowcmd_pipeline.py|agile_keyboard_control.py|box_demo_main.py"
+```
+
+2. 在机器人本体启动导航运控底座：
+
+```bash
+ssh unitree@10.33.12.89
+cd ~/zihou/box_demo_1
+bash start_g1_onboard_nav.sh
+```
+
+3. 在另一个终端启动导航：
+
+```bash
+ssh unitree@10.33.12.89
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate nav
+cd ~/workspace/nav_uat/src
+python run_ros.py
+```
+
+## 必须使用的导航 backend 配置
+
+`~/workspace/nav_uat/src/config.yaml`：
+
+```yaml
+motion_backend:
+  type: groot_http_discrete
+  ipc_url: http://127.0.0.1:5001
+  box_demo_module_path: /home/unitree/zihou/box_demo_1
+```
+
+## 最小测试
+
+先 stop：
+
+```bash
+ros2 topic pub --once /nav/stop_cmd std_msgs/msg/Empty "{}"
+```
+
+再测距离 + 方向：
+
+```bash
+ros2 topic pub --once /nav/relative_cmd std_msgs/msg/String \
+  "{data: '{\"distance_m\": 0.1, \"direction_deg\": 10}'}"
+```
+
+安全稳定后再接 `/nav/text_nav` 完整导航。

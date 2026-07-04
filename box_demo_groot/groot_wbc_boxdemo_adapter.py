@@ -68,6 +68,21 @@ def approach(current: float, target: float, max_delta: float) -> float:
     return max(target, current - max_delta)
 
 
+def _yaw_from_quat(qw: float, qx: float, qy: float, qz: float) -> float:
+    """Heading (yaw) in radians from a (w,x,y,z) quaternion."""
+    return math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
+
+
+def _proj_gravity(qw: float, qx: float, qy: float, qz: float):
+    """Gravity [0,0,-1] expressed in the body frame (matches decoupled_wbc
+    get_gravity_orientation). A nonzero gx == pitch tilt, nonzero gy == roll
+    tilt; a constant gy at rest points at an IMU roll-mount offset."""
+    gx = 2.0 * (qw * qy - qx * qz)
+    gy = -2.0 * (qy * qz + qw * qx)
+    gz = -(qw * qw - qx * qx - qy * qy + qz * qz)
+    return gx, gy, gz
+
+
 def _load_ddsc() -> None:
     ddsc = (
         Path(os.environ.get("CYCLONEDDS_HOME", Path.home() / "cyclonedds-0.10-install"))
@@ -362,9 +377,8 @@ def main() -> None:
 
     torch.set_num_threads(max(1, int(args.torch_threads)))
 
-    if str(args.interface) != "sim":
-        print(f"[dds] ChannelFactoryInitialize(domain={int(args.domain)}, interface={args.interface})")
-        ChannelFactoryInitialize(int(args.domain), str(args.interface))
+    # DDS init 只做一次: 交给 G1Env(带 wbc_config[INTERFACE]=args.interface).
+    # 捆绑版 sdk2py 的 ChannelFactoryInitialize 不幂等, 这里再 init 会 create-domain 冲突.
     try:
         torch.set_num_interop_threads(1)
     except RuntimeError:
@@ -392,6 +406,7 @@ def main() -> None:
     )
     wbc_config = config.load_wbc_yaml()
     wbc_config["DOMAIN_ID"] = int(args.domain)
+    wbc_config["INTERFACE"] = str(args.interface)  # yaml 默认 lo, 必须跟 --interface 一致
 
     waist_location = "lower_and_upper_body" if args.enable_waist else "lower_body"
     robot_model = instantiate_g1_robot_model(
@@ -424,7 +439,10 @@ def main() -> None:
     pose_log = None
     if args.log_pose is not None:
         pose_log = open(args.log_pose, "w")
-        pose_log.write("time,x,y,z,qw,qx,qy,qz,fsm,vx,vy,wz\n")
+        pose_log.write(
+            "time,x,y,z,qw,qx,qy,qz,fsm,vx,vy,wz,"
+            "yaw,gyro_x,gyro_y,gyro_z,grav_x,grav_y,grav_z\n"
+        )
 
     print("=" * 72)
     print("GR00T-WBC adapter for box_demo_2")
@@ -471,11 +489,21 @@ def main() -> None:
             if pose_log is not None:
                 try:
                     p7 = obs["floating_base_pose"]
+                    qw, qx, qy, qz = float(p7[3]), float(p7[4]), float(p7[5]), float(p7[6])
+                    yaw = _yaw_from_quat(qw, qx, qy, qz)
+                    gx, gy, gz = _proj_gravity(qw, qx, qy, qz)
+                    try:
+                        fbv = obs["floating_base_vel"]
+                        wgx, wgy, wgz = float(fbv[3]), float(fbv[4]), float(fbv[5])
+                    except Exception:
+                        wgx = wgy = wgz = 0.0
                     pose_log.write(
-                        "%.4f,%.5f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f,%s,%.4f,%.4f,%.4f\n"
+                        "%.4f,%.5f,%.5f,%.5f,%.6f,%.6f,%.6f,%.6f,%s,%.4f,%.4f,%.4f,"
+                        "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n"
                         % (time.time(), float(p7[0]), float(p7[1]), float(p7[2]),
-                           float(p7[3]), float(p7[4]), float(p7[5]), float(p7[6]),
-                           cmd.fsm, cmd.vx, cmd.vy, cmd.wz))
+                           qw, qx, qy, qz,
+                           cmd.fsm, cmd.vx, cmd.vy, cmd.wz,
+                           yaw, wgx, wgy, wgz, gx, gy, gz))
                     pose_log.flush()
                 except Exception:
                     pass
