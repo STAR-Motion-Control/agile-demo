@@ -97,8 +97,17 @@ bash start_g1_onboard_nav.sh
 - merger
 - GR00T adapter
 - localhost HTTP IPC bridge
+- safety keyboard
 
 不会启动键盘和 box demo。
+
+安全键盘在 tmux pane4：
+
+- `space` / `z`：通过 HTTP `/stop` 清零导航速度，GR00T 继续保持平衡。
+- `o` / `d`：通过 HTTP `/damp` 进入 DAMP 阻尼急停；adapter 以当前关节位置为目标，对全身命令 `dq=0`、`kp=0`、`kd=damping`。
+- `q`：发送 `/stop` 并退出安全键盘 pane。
+
+它不直接写 `/tmp/robojudo_ext_cmd.json`，所以不会破坏 HTTP bridge 单写者原则。
 
 ## 5. 启动导航 ROS bridge
 
@@ -176,6 +185,12 @@ http://10.33.12.89:8008/viz
 
 ```bash
 ros2 topic pub --once /nav/stop_cmd std_msgs/msg/Empty "{}"
+```
+
+现场键盘安全入口：
+
+```text
+tmux pane4: space/z 停止导航速度；o/d 策略阻尼急停。
 ```
 
 停止底座 session：

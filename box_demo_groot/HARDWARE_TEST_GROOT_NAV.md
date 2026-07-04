@@ -25,6 +25,12 @@ cd ~/zihou/box_demo_1
 bash start_g1_onboard_nav.sh
 ```
 
+启动后 tmux 中会有安全键盘 pane：
+
+- `space` / `z`：导航速度归零，保持 GR00T 平衡。
+- `o` / `d`：DAMP 策略急停，全身关节目标速度 `dq=0`，阻尼保持。
+- `q`：发送 stop 并退出安全键盘。
+
 3. 在另一个终端启动导航：
 
 ```bash
