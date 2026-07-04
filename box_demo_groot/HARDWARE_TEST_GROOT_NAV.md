@@ -25,11 +25,17 @@ cd ~/zihou/box_demo_1
 bash start_g1_onboard_nav.sh
 ```
 
-启动后 tmux 中会有安全键盘 pane：
+启动后 tmux 中会有直接 IPC 键盘 pane，键位和 `start_g1_onboard.sh dwbc` 一致：
 
-- `space` / `z`：导航速度归零，保持 GR00T 平衡。
-- `o` / `d`：DAMP 策略急停，全身关节目标速度 `dq=0`，阻尼保持。
-- `q`：发送 stop 并退出安全键盘。
+- `w/s`：前进/后退，默认 `0.20 m/s`。
+- `a/d`：左/右横移，默认 `0.12 m/s`。
+- `q/e`：左/右转向，默认 `0.15 rad/s`。
+- `space`：导航速度归零，保持 GR00T 平衡。
+- `o`：DAMP 策略急停，全身关节目标速度 `dq=0`，阻尼保持。
+- `Ctrl+C`：退出键盘 pane，并写零速度。
+
+手动键盘和 ROS 导航命令都写 `/tmp/robojudo_ext_cmd.json`，必须人工互斥。
+正式导航时不要按运动键，只保留 `space` 和 `o` 作为人工安全入口。
 
 3. 在另一个终端启动导航：
 

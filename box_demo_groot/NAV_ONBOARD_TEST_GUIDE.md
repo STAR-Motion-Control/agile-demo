@@ -30,8 +30,9 @@ nav_uat
   -> rt/lowcmd
 ```
 
-导航联调时不要启动键盘，也不要启动 `box_demo_main.py`。`agile_http_ipc_server.py`
-必须是 `/tmp/robojudo_ext_cmd.json` 的唯一写者。
+导航联调时不要启动 `box_demo_main.py`。`start_g1_onboard_nav.sh` 会启动一个
+与操控+运控一致的直接 IPC 键盘 pane，用于手动验底座和人工安全介入。
+手动键盘和 ROS 导航命令都写 `/tmp/robojudo_ext_cmd.json`，必须人工互斥。
 
 操控+抱箱测试仍使用 `start_g1_onboard.sh dwbc` 或操控团队指定脚本；导航联调使用
 `start_g1_onboard_nav.sh`。
@@ -97,17 +98,24 @@ bash start_g1_onboard_nav.sh
 - merger
 - GR00T adapter
 - localhost HTTP IPC bridge
-- safety keyboard
+- direct IPC keyboard
 
-不会启动键盘和 box demo。
+不会启动 box demo。
 
-安全键盘在 tmux pane4：
+直接 IPC 键盘在 tmux pane4，键位和 `start_g1_onboard.sh dwbc` 的操控+运控键盘一致：
 
-- `space` / `z`：通过 HTTP `/stop` 清零导航速度，GR00T 继续保持平衡。
-- `o` / `d`：通过 HTTP `/damp` 进入 DAMP 阻尼急停；adapter 以当前关节位置为目标，对全身命令 `dq=0`、`kp=0`、`kd=damping`。
-- `q`：发送 `/stop` 并退出安全键盘 pane。
+- `w/s`：前进/后退，默认 `0.20 m/s`。
+- `a/d`：左/右横移，默认 `0.12 m/s`。
+- `q/e`：左/右转向，默认 `0.15 rad/s`。
+- `z/x`：高度下降/上升。
+- `space`：速度归零，GR00T 继续保持平衡。
+- `o`：DAMP 阻尼急停；adapter 以当前关节位置为目标，对全身命令 `dq=0`、`kp=0`、`kd=damping`。
+- `Ctrl+C`：退出键盘 pane，并写零速度。
 
-它不直接写 `/tmp/robojudo_ext_cmd.json`，所以不会破坏 HTTP bridge 单写者原则。
+切换要求：
+
+- 手动键盘验底座时，不要发 `/nav/relative_cmd` 或 `/nav/text_nav`。
+- 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r`；现场只保留 `space` 和 `o` 作为人工安全入口。
 
 ## 5. 启动导航 ROS bridge
 
@@ -190,7 +198,7 @@ ros2 topic pub --once /nav/stop_cmd std_msgs/msg/Empty "{}"
 现场键盘安全入口：
 
 ```text
-tmux pane4: space/z 停止导航速度；o/d 策略阻尼急停。
+tmux pane4: space 停止导航速度；o 策略阻尼急停。
 ```
 
 停止底座 session：

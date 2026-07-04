@@ -9,7 +9,7 @@
 #   1) merge_lowcmd_arm_sdk.py        rt/lowcmd_rl + rt/arm_sdk -> rt/lowcmd
 #   2) groot_wbc_boxdemo_adapter.py   GR00T-WBC -> rt/lowcmd_rl
 #   3) agile_http_ipc_server.py       nav_uat localhost HTTP -> /tmp/robojudo_ext_cmd.json
-#   4) nav_safety_keyboard.py         keyboard stop / DAMP through HTTP bridge
+#   4) agile_keyboard_control.py      direct IPC keyboard, same as manipulation bring-up
 #
 # 用法:
 #   cd ~/zihou/box_demo_1
@@ -155,15 +155,15 @@ echo "tmux 已启动: $SESSION"
 echo "nav_uat 配置应使用: http://127.0.0.1:$HTTP_PORT"
 tmux split-window -v -t "$SESSION:0.0" "
     $SETUP; cd '$SCRIPT_DIR'; sleep 3
-    echo '=== pane4: safety keyboard (space/z stop, o/d DAMP, q exit) ==='
-    python '$SCRIPT_DIR/nav_safety_keyboard.py' \
-        --ipc-url 'http://127.0.0.1:$HTTP_PORT'
-    echo '[safety keyboard exited]'; exec bash"
+    echo '=== pane4: direct IPC keyboard (same as start_g1_onboard.sh) ==='
+    echo 'w/s/a/d/q/e move, z/x height, space stop, o DAMP. Do not use during active ROS nav commands.'
+    python '$SCRIPT_DIR/agile_keyboard_control.py' --key-timeout 0.25
+    echo '[keyboard exited]'; exec bash"
 
 tmux select-layout -t "$SESSION" tiled
 
-echo "注意: 本 session 不启动运动键盘和 box_demo_main.py，HTTP bridge 是 /tmp/robojudo_ext_cmd.json 单写者。"
-echo "安全键盘: space/z=速度归零并保持平衡, o/d=DAMP 策略急停, q=退出安全键盘。"
+echo "注意: 本 session 不启动 box_demo_main.py。pane4 键盘与 ROS 导航命令都写 /tmp/robojudo_ext_cmd.json，二者必须人工互斥。"
+echo "键盘: w/s/a/d/q/e 运动, z/x 高度, space=速度归零并保持平衡, o=DAMP 策略急停, Ctrl+C=退出键盘。"
 
 if [[ "$ATTACH" == "1" ]]; then
     tmux attach -t "$SESSION"
