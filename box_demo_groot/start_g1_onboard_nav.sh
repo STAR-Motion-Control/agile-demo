@@ -28,10 +28,17 @@ HTTP_HOST="${HTTP_HOST:-127.0.0.1}"
 HTTP_PORT="${HTTP_PORT:-5001}"
 LEGACY_CMD_FILE="${LEGACY_CMD_FILE:-/tmp/robojudo_ext_cmd.json}"
 TORCH_THREADS="${TORCH_THREADS:-2}"
-FWD_MAX="${FWD_MAX:-0.30}"
-LAT_MAX="${LAT_MAX:-0.15}"
-YAW_MAX="${YAW_MAX:-0.30}"
-HEIGHT_RATE="${HEIGHT_RATE:-0.10}"
+# 底座限幅(与 adapter 内置默认一致; 键盘/nav 发的命令最终都被这层截断)。
+# 可用环境变量(FWD_MAX=0.4 bash ...)或旗标(--fwd-max 0.4)覆盖。
+# ⚠️ YAW_MAX 别低于 0.4: 真机 yaw 跟踪率 ~78%, 0.30 时有效转速仅 ~0.23rad/s
+# 太临界, 叠加轻微不对称会单侧转不动(2026-07-04 001 左转事件)。
+FWD_MAX="${FWD_MAX:-0.50}"          # 前向速度上限 m/s (速度指标测试才要 1.3)
+LAT_MAX="${LAT_MAX:-0.40}"          # 横向速度上限 m/s
+YAW_MAX="${YAW_MAX:-0.60}"          # 转向角速度上限 rad/s
+HEIGHT_RATE="${HEIGHT_RATE:-0.20}"  # 高度变化速率上限 m/s
+# 稳走关键高度参数(= adapter 默认, 显式写出防默认漂移; sim round11 标定):
+STAND_HEIGHT="${STAND_HEIGHT:-0.74}"  # 行走一律站高(0.74 最优, 0.78 不更稳)
+WALK_FLOOR="${WALK_FLOOR:-0.72}"      # 低位拒走 warmup 地板(拦速度打印 [GATE])
 DRY_RUN=""
 ATTACH=1
 AUTO_POLICY_ARGS=""
@@ -60,6 +67,8 @@ while [[ $# -gt 0 ]]; do
         --lat-max) LAT_MAX="$2"; ADAPTER_EXTRA+=("--lat-max" "$2"); shift 2 ;;
         --yaw-max) YAW_MAX="$2"; ADAPTER_EXTRA+=("--yaw-max" "$2"); shift 2 ;;
         --height-rate) HEIGHT_RATE="$2"; ADAPTER_EXTRA+=("--height-rate" "$2"); shift 2 ;;
+        --stand-height) STAND_HEIGHT="$2"; shift 2 ;;
+        --walk-height-floor) WALK_FLOOR="$2"; shift 2 ;;
         --dry-run) DRY_RUN="--dry-run"; shift ;;
         --no-auto-activate-policy) AUTO_POLICY_ARGS="--no-auto-activate-policy"; shift ;;
         --no-attach) ATTACH=0; shift ;;
@@ -108,6 +117,7 @@ echo "  iface/domain: $IFACE / $DOMAIN"
 echo "  conda env:    $CONDA_ENV"
 echo "  GROOT_REPO:   $GROOT_REPO"
 echo "  limits:       fwd=$FWD_MAX lat=$LAT_MAX yaw=$YAW_MAX height_rate=$HEIGHT_RATE"
+echo "  height:       stand=$STAND_HEIGHT walk_floor=$WALK_FLOOR (低位拒走 warmup)"
 echo "  HTTP bridge:  http://$HTTP_HOST:$HTTP_PORT -> $LEGACY_CMD_FILE"
 echo "  dry-run:      ${DRY_RUN:-no}"
 echo "========================================"
@@ -134,6 +144,8 @@ tmux split-window -h -t "$SESSION" "
         --lat-max '$LAT_MAX' \
         --yaw-max '$YAW_MAX' \
         --height-rate '$HEIGHT_RATE' \
+        --stand-height '$STAND_HEIGHT' \
+        --walk-height-floor '$WALK_FLOOR' \
         $AUTO_POLICY_ARGS \
         ${ADAPTER_EXTRA[*]} \
         $DRY_RUN
@@ -157,7 +169,8 @@ tmux split-window -v -t "$SESSION:0.0" "
     $SETUP; cd '$SCRIPT_DIR'; sleep 3
     echo '=== pane4: direct IPC keyboard (same as start_g1_onboard.sh) ==='
     echo 'w/s/a/d/q/e move, z/x height, space stop, o DAMP. Do not use during active ROS nav commands.'
-    python '$SCRIPT_DIR/agile_keyboard_control.py' --key-timeout 0.25
+    # 统一键速(7-06): 前进0.40(后退被 adapter 硬截0.2), vy 0.25(round12), wz 0.40
+    python '$SCRIPT_DIR/agile_keyboard_control.py' --key-timeout 0.25 --vx 0.40 --vy 0.25 --wz 0.40
     echo '[keyboard exited]'; exec bash"
 
 tmux select-layout -t "$SESSION" tiled

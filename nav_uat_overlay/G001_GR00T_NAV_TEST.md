@@ -9,10 +9,15 @@ motion_backend:
   type: groot_http_discrete
   ipc_url: http://127.0.0.1:5001
   box_demo_module_path: /home/unitree/zihou/box_demo_1
+  stand_height: 0.74
+  fwd_cruise: 0.40
+  lat_cruise: 0.25
+  yaw_cruise: 0.40
 ```
 
 这表示导航通过机器人本体 localhost HTTP bridge 写入
 `/tmp/robojudo_ext_cmd.json`，不再经过 5080。
+默认站高和巡航速度与导航启动器 pane4 的键盘控制保持一致。
 
 ## 2. 启动本体运控服务
 

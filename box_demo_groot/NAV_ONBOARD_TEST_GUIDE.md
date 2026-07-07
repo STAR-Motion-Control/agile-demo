@@ -104,9 +104,9 @@ bash start_g1_onboard_nav.sh
 
 直接 IPC 键盘在 tmux pane4，键位和 `start_g1_onboard.sh dwbc` 的操控+运控键盘一致：
 
-- `w/s`：前进/后退，默认 `0.20 m/s`。
-- `a/d`：左/右横移，默认 `0.12 m/s`。
-- `q/e`：左/右转向，默认 `0.15 rad/s`。
+- `w/s`：前进/后退，导航启动器传参为 `0.40 m/s`。
+- `a/d`：左/右横移，导航启动器传参为 `0.25 m/s`。
+- `q/e`：左/右转向，导航启动器传参为 `0.40 rad/s`。
 - `z/x`：高度下降/上升。
 - `space`：速度归零，GR00T 继续保持平衡。
 - `o`：DAMP 阻尼急停；adapter 以当前关节位置为目标，对全身命令 `dq=0`、`kp=0`、`kd=damping`。
@@ -116,6 +116,8 @@ bash start_g1_onboard_nav.sh
 
 - 手动键盘验底座时，不要发 `/nav/relative_cmd` 或 `/nav/text_nav`。
 - 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r`；现场只保留 `space` 和 `o` 作为人工安全入口。
+
+ROS 导航信号的 `motion_backend` 也使用同一组 cruise 速度，并统一站高 `0.74 m`。
 
 ## 5. 启动导航 ROS bridge
 
