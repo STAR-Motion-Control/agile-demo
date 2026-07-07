@@ -58,9 +58,11 @@ motion_backend:
   http_timeout: 2.0
   stand_height: 0.74
   fwd_cruise: 0.40
+  back_cruise: 0.20
   lat_cruise: 0.25
   yaw_cruise: 0.40
   fwd_max: 0.50
+  back_max: 0.20
   lat_max: 0.40
   yaw_max: 0.60
   min_duration: 1.5

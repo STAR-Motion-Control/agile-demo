@@ -26,6 +26,10 @@ DEFAULT_STATE_DIR = "/tmp/agile_sim2sim"
 STAND_HEIGHT = 0.74
 MIN_HEIGHT = 0.40
 MAX_HEIGHT = 0.74
+FWD_SPEED = 0.40
+BACK_SPEED = 0.20
+LAT_SPEED = 0.25
+YAW_RATE = 0.40
 
 _motion_lock = threading.Lock()
 _motion_stop: threading.Event | None = None
@@ -222,21 +226,24 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(write_cmd(fsm, vx, vy, wz, height))
             elif path == "/forward":
                 distance = get_float(qs, "distance", 0.08)
-                speed = abs(get_float(qs, "speed", 0.40))
+                default_speed = FWD_SPEED if distance >= 0.0 else BACK_SPEED
+                speed = abs(get_float(qs, "speed", default_speed))
+                if distance < 0.0:
+                    speed = min(speed, BACK_SPEED)
                 speed = max(speed, 1e-6)
                 vx = math.copysign(speed, distance)
                 duration = abs(distance) / speed
                 self._json(start_motion(vx, 0.0, 0.0, duration, height, fsm, refresh_s))
             elif path == "/lateral":
                 distance = get_float(qs, "distance", 0.05)
-                speed = abs(get_float(qs, "speed", 0.25))
+                speed = abs(get_float(qs, "speed", LAT_SPEED))
                 speed = max(speed, 1e-6)
                 vy = math.copysign(speed, distance)
                 duration = abs(distance) / speed
                 self._json(start_motion(0.0, vy, 0.0, duration, height, fsm, refresh_s))
             elif path == "/rotate":
                 angle = get_float(qs, "angle", 0.1)
-                yaw_rate = abs(get_float(qs, "yaw_rate", 0.40))
+                yaw_rate = abs(get_float(qs, "yaw_rate", YAW_RATE))
                 yaw_rate = max(yaw_rate, 1e-6)
                 wz = math.copysign(yaw_rate, angle)
                 duration = abs(angle) / yaw_rate

@@ -104,7 +104,7 @@ bash start_g1_onboard_nav.sh
 
 直接 IPC 键盘在 tmux pane4，键位和 `start_g1_onboard.sh dwbc` 的操控+运控键盘一致：
 
-- `w/s`：前进/后退，导航启动器传参为 `0.40 m/s`。
+- `w/s`：前进/后退，键盘写入 `+0.40/-0.40 m/s`，adapter 会把后退夹到安全上限 `0.20 m/s`。
 - `a/d`：左/右横移，导航启动器传参为 `0.25 m/s`。
 - `q/e`：左/右转向，导航启动器传参为 `0.40 rad/s`。
 - `z/x`：高度下降/上升。
@@ -117,7 +117,7 @@ bash start_g1_onboard_nav.sh
 - 手动键盘验底座时，不要发 `/nav/relative_cmd` 或 `/nav/text_nav`。
 - 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r`；现场只保留 `space` 和 `o` 作为人工安全入口。
 
-ROS 导航信号的 `motion_backend` 也使用同一组 cruise 速度，并统一站高 `0.74 m`。
+ROS 导航信号和 HTTP bridge 使用同一组默认值：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`，统一站高 `0.74 m`。负距离后退会按 `0.20 m/s` 计算持续时间，不只依赖 adapter 夹限。
 
 ## 5. 启动导航 ROS bridge
 
@@ -138,6 +138,11 @@ motion_backend:
   type: groot_http_discrete
   ipc_url: http://127.0.0.1:5001
   box_demo_module_path: /home/unitree/zihou/box_demo_1
+  stand_height: 0.74
+  fwd_cruise: 0.40
+  back_cruise: 0.20
+  lat_cruise: 0.25
+  yaw_cruise: 0.40
 ```
 
 ## 6. 小步联调顺序

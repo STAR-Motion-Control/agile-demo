@@ -11,13 +11,14 @@ motion_backend:
   box_demo_module_path: /home/unitree/zihou/box_demo_1
   stand_height: 0.74
   fwd_cruise: 0.40
+  back_cruise: 0.20
   lat_cruise: 0.25
   yaw_cruise: 0.40
 ```
 
 这表示导航通过机器人本体 localhost HTTP bridge 写入
 `/tmp/robojudo_ext_cmd.json`，不再经过 5080。
-默认站高和巡航速度与导航启动器 pane4 的键盘控制保持一致。
+默认站高和巡航速度与导航启动器 pane4 的键盘控制、HTTP bridge、adapter 保持一致：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`、站高 `0.74 m`。键盘 `s` 会写入 `-0.40 m/s`，但 adapter 后退安全上限为 `0.20 m/s`；导航和 HTTP 负距离后退会直接按 `0.20 m/s` 计算持续时间。
 
 ## 2. 启动本体运控服务
 
@@ -28,7 +29,7 @@ cd /home/unitree/zihou/box_demo_1
 bash start_g1_onboard_nav.sh
 ```
 
-该脚本启动 merger、GR00T adapter、HTTP IPC bridge，不启动键盘和 box demo。
+该脚本启动 merger、GR00T adapter、HTTP IPC bridge 和直接 IPC 键盘，不启动 box demo。
 
 dry-run：
 

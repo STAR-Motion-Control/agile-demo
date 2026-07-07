@@ -96,6 +96,7 @@ YAW_MAX = 0.60   # rad/s
 # Cruise speeds for precise moves (well below the caps; smaller = less overshoot).
 # Bumped from 0.12/0.10 — mujoco: higher cruise = higher realized efficiency.
 FWD_CRUISE = 0.15  # m/s
+BACK_CRUISE = 0.20  # m/s, matches adapter BACK_VX_MAX
 LAT_CRUISE = 0.12  # m/s
 YAW_CRUISE = 0.15  # rad/s (~8.6 deg/s)
 
@@ -245,9 +246,10 @@ class GrootMover:
 
     def __init__(self, velocity: float | None = None, *, cmd_file: str = CMD_FILE,
                  stand_height: float = STAND_HEIGHT,
-                 fwd_cruise: float = FWD_CRUISE, lat_cruise: float = LAT_CRUISE,
+                 fwd_cruise: float = FWD_CRUISE, back_cruise: float = BACK_CRUISE,
+                 lat_cruise: float = LAT_CRUISE,
                  yaw_cruise: float = YAW_CRUISE, fwd_max: float = FWD_MAX,
-                 lat_max: float = LAT_MAX, yaw_max: float = YAW_MAX,
+                 back_max: float = BACK_CRUISE, lat_max: float = LAT_MAX, yaw_max: float = YAW_MAX,
                  v_floor: float = V_FLOOR, w_floor: float = W_FLOOR,
                  min_duration: float = MIN_DURATION, refresh_hz: float = REFRESH_HZ,
                  stop_hold_s: float = STOP_HOLD_S, min_distance: float = MIN_DISTANCE,
@@ -260,9 +262,11 @@ class GrootMover:
         self._height = stand_height
         # `velocity` (RobotMover-compatible positional) overrides the fwd cruise.
         self.fwd_cruise = float(velocity) if velocity else fwd_cruise
+        self.back_cruise = back_cruise
         self.lat_cruise = lat_cruise
         self.yaw_cruise = yaw_cruise
-        self.fwd_max, self.lat_max, self.yaw_max = fwd_max, lat_max, yaw_max
+        self.fwd_max, self.back_max = fwd_max, back_max
+        self.lat_max, self.yaw_max = lat_max, yaw_max
         self.v_floor, self.w_floor = v_floor, w_floor
         # Reliability knobs (mujoco-tuned; see module docstring). All are plain
         # attributes so box_demo can tweak per-test:
@@ -371,8 +375,10 @@ class GrootMover:
         """Forward (+) / backward (-) by distance in METERS. Blocks until done."""
         desired = self._snap_min_distance(distance_m, "forward")
         commanded = desired * self.dist_gain
-        plan = solve_linear(commanded, self.fwd_cruise, self.v_floor,
-                            self.fwd_max, self.min_duration)
+        cruise = self.fwd_cruise if commanded >= 0.0 else self.back_cruise
+        max_speed = self.fwd_max if commanded >= 0.0 else self.back_max
+        plan = solve_linear(commanded, cruise, self.v_floor,
+                            max_speed, self.min_duration)
         if plan.duration <= 0:
             return plan
         self._guard_walk_height()

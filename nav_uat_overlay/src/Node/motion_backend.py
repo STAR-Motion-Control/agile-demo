@@ -65,9 +65,11 @@ class GrootHttpDiscreteBackend:
 
         mover_kwargs = {
             "fwd_cruise": float(config_get(backend_cfg, "fwd_cruise", 0.40)),
+            "back_cruise": float(config_get(backend_cfg, "back_cruise", 0.20)),
             "lat_cruise": float(config_get(backend_cfg, "lat_cruise", 0.25)),
             "yaw_cruise": float(config_get(backend_cfg, "yaw_cruise", 0.40)),
             "fwd_max": float(config_get(backend_cfg, "fwd_max", 0.50)),
+            "back_max": float(config_get(backend_cfg, "back_max", 0.20)),
             "lat_max": float(config_get(backend_cfg, "lat_max", 0.40)),
             "yaw_max": float(config_get(backend_cfg, "yaw_max", 0.60)),
             "min_duration": float(config_get(backend_cfg, "min_duration", 1.5)),
