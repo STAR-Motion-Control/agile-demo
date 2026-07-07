@@ -7,7 +7,10 @@ This document explains how to start `run_ros.py`, how to use the ROS bridge, and
 `run_ros.py` uses Hydra with `config_path="."`, so start it from the `src` directory in this worktree:
 
 ```bash
+source ~/miniconda3/etc/profile.d/conda.sh
 conda activate nav
+source /opt/ros/humble/setup.bash
+source ~/unitree_ros2/install/setup.bash
 cd /home/unitree/workspace/nav_uat/src
 python run_ros.py
 ```
@@ -33,6 +36,20 @@ The backend serves:
 - WebSocket: `/viz/ws`
 - Map metadata: `/viz/api/map/metadata`
 - Latest image frames: `/viz/api/frame/...`
+
+On G001 the RGBD input is published by `RGBDClient` itself. Confirm
+`src/config.yaml` uses:
+
+```yaml
+rgbd_server:
+  launch_rgbd_server: true
+  publish_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
+  subscrib_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
+```
 
 Before using the built frontend, build it once from the visualization worktree:
 

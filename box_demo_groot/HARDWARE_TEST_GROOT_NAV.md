@@ -44,6 +44,8 @@ ROS 导航信号和 HTTP bridge 的默认值与键盘/adapter 对齐：前进 `0
 ssh unitree@10.33.12.89
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate nav
+source /opt/ros/humble/setup.bash
+source ~/unitree_ros2/install/setup.bash
 cd ~/workspace/nav_uat/src
 python run_ros.py
 ```
@@ -62,6 +64,19 @@ motion_backend:
   back_cruise: 0.20
   lat_cruise: 0.25
   yaw_cruise: 0.40
+```
+
+RGBD 也必须由导航进程自启动：
+
+```yaml
+rgbd_server:
+  launch_rgbd_server: true
+  publish_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
+  subscrib_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
 ```
 
 ## 最小测试

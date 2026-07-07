@@ -20,6 +20,19 @@ motion_backend:
 `/tmp/robojudo_ext_cmd.json`，不再经过 5080。
 默认站高和巡航速度与导航启动器 pane4 的键盘控制、HTTP bridge、adapter 保持一致：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`、站高 `0.74 m`。键盘 `s` 会写入 `-0.40 m/s`，但 adapter 后退安全上限为 `0.20 m/s`；导航和 HTTP 负距离后退会直接按 `0.20 m/s` 计算持续时间。
 
+RGBD 配置必须让导航自启动 RealSense，并订阅它自己发布的图像：
+
+```yaml
+rgbd_server:
+  launch_rgbd_server: true
+  publish_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
+  subscrib_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
+```
+
 ## 2. 启动本体运控服务
 
 现场确认安全后，在机器人本体执行：
@@ -46,6 +59,8 @@ tmux kill-session -t g1-onboard-nav
 ```bash
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate nav
+source /opt/ros/humble/setup.bash
+source ~/unitree_ros2/install/setup.bash
 cd /home/unitree/workspace/nav_uat/src
 python run_ros.py
 ```

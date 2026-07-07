@@ -127,6 +127,8 @@ ROS 导航信号和 HTTP bridge 使用同一组默认值：前进 `0.40 m/s`、�
 ssh unitree@10.33.12.89
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate nav
+source /opt/ros/humble/setup.bash
+source ~/unitree_ros2/install/setup.bash
 cd ~/workspace/nav_uat/src
 python run_ros.py
 ```
@@ -143,6 +145,19 @@ motion_backend:
   back_cruise: 0.20
   lat_cruise: 0.25
   yaw_cruise: 0.40
+```
+
+同时确认 RGBD 由导航进程自启动并发布：
+
+```yaml
+rgbd_server:
+  launch_rgbd_server: true
+  publish_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
+  subscrib_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
 ```
 
 ## 6. 小步联调顺序
