@@ -9,6 +9,8 @@ motion_backend:
   type: groot_http_discrete
   ipc_url: http://127.0.0.1:5001
   box_demo_module_path: /home/unitree/zihou/box_demo_1
+  motion_profile: precise
+  profile_file: /tmp/groot_nav_motion_profile.json
   stand_height: 0.74
   fwd_cruise: 0.40
   back_cruise: 0.20
@@ -19,6 +21,13 @@ motion_backend:
 这表示导航通过机器人本体 localhost HTTP bridge 写入
 `/tmp/robojudo_ext_cmd.json`，不再经过 5080。
 默认站高和巡航速度与导航启动器 pane4 的键盘控制、HTTP bridge、adapter 保持一致：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`、站高 `0.74 m`。键盘 `s` 会写入 `-0.40 m/s`，但 adapter 后退安全上限为 `0.20 m/s`；导航和 HTTP 负距离后退会直接按 `0.20 m/s` 计算持续时间。
+
+实际执行 profile 由 `start_g1_onboard_nav.sh --nav-motion-profile` 决定：
+
+- `precise`：默认。保留 `min_duration=1.5`、`min_distance=0.08`，适合可靠小步。
+- `keyboard`：关闭 `min_duration/min_distance`，主运动段使用键盘同样巡航速度，适合对比键盘和导航姿态。
+
+两种模式都保留线性 warm-up。启动脚本会把选择写入 `/tmp/groot_nav_motion_profile.json`，`nav_uat` 启动时读取。
 
 RGBD 配置必须让导航自启动 RealSense，并订阅它自己发布的图像：
 
@@ -40,6 +49,12 @@ rgbd_server:
 ```bash
 cd /home/unitree/zihou/box_demo_1
 bash start_g1_onboard_nav.sh
+```
+
+使用键盘速度 profile：
+
+```bash
+bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 ```
 
 该脚本启动 merger、GR00T adapter、HTTP IPC bridge 和直接 IPC 键盘，不启动 box demo。
