@@ -16,6 +16,10 @@ motion_backend:
   back_cruise: 0.20
   lat_cruise: 0.25
   yaw_cruise: 0.40
+  min_duration: 1.0
+  min_distance: 0.08
+  v_floor: 0.10
+  w_floor: 0.10
 ```
 
 这表示导航通过机器人本体 localhost HTTP bridge 写入
@@ -24,7 +28,7 @@ motion_backend:
 
 实际执行 profile 由 `start_g1_onboard_nav.sh --nav-motion-profile` 决定：
 
-- `precise`：默认。保留 `min_duration=1.5`、`min_distance=0.08`，适合可靠小步。
+- `precise`：默认。保留 `min_duration=1.0`、`min_distance=0.08`、`v_floor=0.10`，适合可靠小步。
 - `keyboard`：关闭 `min_duration/min_distance`，主运动段使用键盘同样巡航速度，适合对比键盘和导航姿态。
 
 两种模式都保留线性 warm-up。启动脚本会把选择写入 `/tmp/groot_nav_motion_profile.json`，`nav_uat` 启动时读取。

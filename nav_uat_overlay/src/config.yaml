@@ -69,8 +69,10 @@ motion_backend:
   back_max: 0.20
   lat_max: 0.40
   yaw_max: 0.60
-  min_duration: 1.5
+  min_duration: 1.0
   min_distance: 0.08
+  v_floor: 0.10
+  w_floor: 0.10
   warmup_time: 0.6
   warmup_speed: 0.15
   settle_before_s: 0.0

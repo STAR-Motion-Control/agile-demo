@@ -97,8 +97,10 @@ class GrootHttpDiscreteBackend:
             min_duration = 0.0
             min_distance = 0.0
         else:
-            min_duration = float(config_get(backend_cfg, "min_duration", 1.5))
+            min_duration = float(config_get(backend_cfg, "min_duration", 1.0))
             min_distance = float(config_get(backend_cfg, "min_distance", 0.08))
+        v_floor = float(config_get(backend_cfg, "v_floor", 0.10))
+        w_floor = float(config_get(backend_cfg, "w_floor", 0.10))
 
         if module_path and module_path not in sys.path:
             sys.path.insert(0, module_path)
@@ -130,6 +132,8 @@ class GrootHttpDiscreteBackend:
             "back_max": float(config_get(backend_cfg, "back_max", 0.20)),
             "lat_max": float(config_get(backend_cfg, "lat_max", 0.40)),
             "yaw_max": float(config_get(backend_cfg, "yaw_max", 0.60)),
+            "v_floor": v_floor,
+            "w_floor": w_floor,
             "min_duration": min_duration,
             "min_distance": min_distance,
             "warmup_time": warmup_time,
@@ -145,11 +149,13 @@ class GrootHttpDiscreteBackend:
         self._mover = StrictRemoteMover(ipc_url, timeout=timeout, **mover_kwargs)
         self.log.info(
             "Using GR00T HTTP discrete motion backend at %s (profile=%s, "
-            "min_duration=%.2f, min_distance=%.2f, warmup=%.2fs@%.2fm/s)",
+            "min_duration=%.2f, min_distance=%.2f, v_floor=%.2f, "
+            "warmup=%.2fs@%.2fm/s)",
             ipc_url,
             motion_profile,
             min_duration,
             min_distance,
+            v_floor,
             warmup_time,
             warmup_speed,
         )

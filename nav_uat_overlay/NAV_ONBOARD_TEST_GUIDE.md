@@ -128,7 +128,7 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 
 ROS 导航信号和 HTTP bridge 使用同一组速度上限：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`，统一站高 `0.74 m`。实际执行 profile 由 `start_g1_onboard_nav.sh --nav-motion-profile` 决定：
 
-- `precise`：默认。保留 `min_duration=1.5`、`min_distance=0.08`，适合可靠小步，但主运动速度可能低于键盘速度。
+- `precise`：默认。保留 `min_duration=1.0`、`min_distance=0.08`、`v_floor=0.10`，适合可靠小步，但主运动速度可能低于键盘速度。
 - `keyboard`：使用键盘同样巡航速度，关闭 `min_duration/min_distance`，适合对比键盘和导航姿态。
 
 两种模式都保留 warm-up。profile 会写入 `/tmp/groot_nav_motion_profile.json`，`nav_uat` 的 `motion_backend.py` 会在启动时读取。
@@ -161,6 +161,10 @@ motion_backend:
   back_cruise: 0.20
   lat_cruise: 0.25
   yaw_cruise: 0.40
+  min_duration: 1.0
+  min_distance: 0.08
+  v_floor: 0.10
+  w_floor: 0.10
 ```
 
 同时确认 RGBD 由导航进程自启动并发布：
