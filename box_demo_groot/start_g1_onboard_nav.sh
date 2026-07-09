@@ -14,6 +14,7 @@
 # 用法:
 #   cd ~/zihou/box_demo_1
 #   bash start_g1_onboard_nav.sh
+#   bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 #   bash start_g1_onboard_nav.sh --dry-run --no-attach
 
 set -eu
@@ -27,6 +28,8 @@ GROOT_REPO="${GROOT_REPO:-$HOME/zihou/GR00T-WholeBodyControl}"
 HTTP_HOST="${HTTP_HOST:-127.0.0.1}"
 HTTP_PORT="${HTTP_PORT:-5001}"
 LEGACY_CMD_FILE="${LEGACY_CMD_FILE:-/tmp/robojudo_ext_cmd.json}"
+NAV_PROFILE_FILE="${NAV_PROFILE_FILE:-/tmp/groot_nav_motion_profile.json}"
+NAV_MOTION_PROFILE="${NAV_MOTION_PROFILE:-precise}"  # precise | keyboard
 TORCH_THREADS="${TORCH_THREADS:-2}"
 # 底座限幅(与 adapter 内置默认一致; 键盘/nav 发的命令最终都被这层截断)。
 # 可用环境变量(FWD_MAX=0.4 bash ...)或旗标(--fwd-max 0.4)覆盖。
@@ -62,6 +65,8 @@ while [[ $# -gt 0 ]]; do
         --http-host) HTTP_HOST="$2"; shift 2 ;;
         --http-port) HTTP_PORT="$2"; shift 2 ;;
         --legacy-cmd-file) LEGACY_CMD_FILE="$2"; shift 2 ;;
+        --nav-motion-profile|--motion-profile) NAV_MOTION_PROFILE="$2"; shift 2 ;;
+        --nav-profile-file) NAV_PROFILE_FILE="$2"; shift 2 ;;
         --torch-threads) TORCH_THREADS="$2"; shift 2 ;;
         --fwd-max) FWD_MAX="$2"; ADAPTER_EXTRA+=("--fwd-max" "$2"); shift 2 ;;
         --lat-max) LAT_MAX="$2"; ADAPTER_EXTRA+=("--lat-max" "$2"); shift 2 ;;
@@ -76,6 +81,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+case "$NAV_MOTION_PROFILE" in
+    precise|min-step|min_step|reliable|default)
+        NAV_MOTION_PROFILE="precise"
+        ;;
+    keyboard|keyboard-like|keyboard_like|direct|direct-speed|direct_speed)
+        NAV_MOTION_PROFILE="keyboard"
+        ;;
+    *)
+        echo "Unknown --nav-motion-profile '$NAV_MOTION_PROFILE' (use precise or keyboard)"
+        exit 2
+        ;;
+esac
+
 if [[ ! -d "$GROOT_REPO/decoupled_wbc" ]]; then
     echo "GR00T repo not found: $GROOT_REPO"
     exit 1
@@ -84,7 +102,7 @@ fi
 # 清理每个 pane 继承到的 ROS/LD_LIBRARY_PATH 污染。真机控制链走 sdk2py DDS，
 # 001/G001 上没有完整 /opt/ros 时使用 rclpy_stub 让 decoupled_wbc import 通过。
 SANITIZE="unset LD_LIBRARY_PATH AMENT_PREFIX_PATH COLCON_PREFIX_PATH ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION ROS_LOCALHOST_ONLY PYTHONPATH"
-SETUP="$SANITIZE; source \$HOME/miniconda3/etc/profile.d/conda.sh && conda activate $CONDA_ENV && export UNITREE_DDS_INTERFACE='$IFACE'"
+SETUP="$SANITIZE; source \$HOME/miniconda3/etc/profile.d/conda.sh && conda activate $CONDA_ENV && export UNITREE_DDS_INTERFACE='$IFACE' GROOT_NAV_MOTION_PROFILE='$NAV_MOTION_PROFILE' GROOT_NAV_MOTION_PROFILE_FILE='$NAV_PROFILE_FILE'"
 if [[ -f /opt/ros/humble/setup.bash && -d "$HOME/cyclonedds-0.10-install" ]]; then
     ROS_SRC="source /opt/ros/humble/setup.bash &&"
     RCLPY_STUB=""
@@ -111,6 +129,24 @@ if ! ping -c1 -W1 192.168.123.161 >/dev/null 2>&1; then
     echo "[WARN] 内网 MCU(192.168.123.161) ping 不通。dry-run 可继续，真机运动前必须修复。"
 fi
 
+python3 - "$NAV_MOTION_PROFILE" "$NAV_PROFILE_FILE" <<'PY'
+import json
+import os
+import sys
+import time
+
+profile, path = sys.argv[1], sys.argv[2]
+payload = {
+    "motion_profile": profile,
+    "updated_at": time.time(),
+    "note": "Read by nav_uat Node/motion_backend.py. precise keeps min_duration/min_distance; keyboard uses keyboard cruise speeds. Warm-up remains enabled in both modes.",
+}
+tmp = f"{path}.{os.getpid()}.tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(payload, f, ensure_ascii=False, indent=2)
+os.replace(tmp, path)
+PY
+
 echo "========================================"
 echo "  G1 onboard nav + GR00T-WBC lower body"
 echo "  iface/domain: $IFACE / $DOMAIN"
@@ -119,6 +155,7 @@ echo "  GROOT_REPO:   $GROOT_REPO"
 echo "  limits:       fwd=$FWD_MAX lat=$LAT_MAX yaw=$YAW_MAX height_rate=$HEIGHT_RATE"
 echo "  height:       stand=$STAND_HEIGHT walk_floor=$WALK_FLOOR (低位拒走 warmup)"
 echo "  HTTP bridge:  http://$HTTP_HOST:$HTTP_PORT -> $LEGACY_CMD_FILE"
+echo "  nav profile:  $NAV_MOTION_PROFILE ($NAV_PROFILE_FILE)"
 echo "  dry-run:      ${DRY_RUN:-no}"
 echo "========================================"
 
@@ -165,6 +202,7 @@ tmux select-layout -t "$SESSION" tiled
 
 echo "tmux 已启动: $SESSION"
 echo "nav_uat 配置应使用: http://127.0.0.1:$HTTP_PORT"
+echo "nav_uat motion profile: $NAV_MOTION_PROFILE (由 $NAV_PROFILE_FILE 传给 motion_backend.py)"
 tmux split-window -v -t "$SESSION:0.0" "
     $SETUP; cd '$SCRIPT_DIR'; sleep 3
     echo '=== pane4: direct IPC keyboard (same as start_g1_onboard.sh) ==='

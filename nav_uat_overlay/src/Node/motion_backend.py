@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import sys
 from typing import Any
@@ -13,6 +14,50 @@ def config_get(config: Any, key: str, default: Any = None) -> Any:
     if hasattr(config, "get") and callable(config.get):
         return config.get(key, default)
     return getattr(config, key, default)
+
+
+def _profile_alias(value: Any) -> str:
+    name = str(value or "").strip().lower().replace("-", "_")
+    if name in ("keyboard", "keyboard_like", "direct", "direct_speed"):
+        return "keyboard"
+    if name in ("precise", "min_step", "minstep", "reliable", "default"):
+        return "precise"
+    return name
+
+
+def _read_profile_file(path: str | None) -> str | None:
+    if not path:
+        return None
+    try:
+        with open(os.path.expanduser(path), "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        logger.warning("Cannot read GR00T nav motion profile file %s: %s", path, exc)
+        return None
+    for key in ("motion_profile", "nav_motion_profile", "profile"):
+        if key in payload:
+            return str(payload[key])
+    return None
+
+
+def resolve_motion_profile(backend_cfg: Any) -> str:
+    configured = config_get(backend_cfg, "motion_profile", "precise")
+    profile_file = os.environ.get(
+        "GROOT_NAV_MOTION_PROFILE_FILE",
+        str(config_get(backend_cfg, "profile_file", "/tmp/groot_nav_motion_profile.json")),
+    )
+    raw_profile = (
+        os.environ.get("GROOT_NAV_MOTION_PROFILE")
+        or _read_profile_file(profile_file)
+        or configured
+    )
+    profile = _profile_alias(raw_profile)
+    if profile not in ("precise", "keyboard"):
+        logger.warning("Unknown GR00T nav motion profile %r; falling back to precise", raw_profile)
+        return "precise"
+    return profile
 
 
 class GrootHttpDiscreteBackend:
@@ -41,6 +86,19 @@ class GrootHttpDiscreteBackend:
         )
         ipc_url = str(config_get(backend_cfg, "ipc_url", "http://192.168.123.222:5001")).rstrip("/")
         timeout = float(config_get(backend_cfg, "http_timeout", 2.0))
+        motion_profile = resolve_motion_profile(backend_cfg)
+        warmup_time = float(config_get(backend_cfg, "warmup_time", 0.6))
+        warmup_speed = float(config_get(backend_cfg, "warmup_speed", 0.15))
+        if warmup_time <= 0.0:
+            warmup_time = 0.6
+        if warmup_speed <= 0.0:
+            warmup_speed = 0.15
+        if motion_profile == "keyboard":
+            min_duration = 0.0
+            min_distance = 0.0
+        else:
+            min_duration = float(config_get(backend_cfg, "min_duration", 1.5))
+            min_distance = float(config_get(backend_cfg, "min_distance", 0.08))
 
         if module_path and module_path not in sys.path:
             sys.path.insert(0, module_path)
@@ -72,10 +130,10 @@ class GrootHttpDiscreteBackend:
             "back_max": float(config_get(backend_cfg, "back_max", 0.20)),
             "lat_max": float(config_get(backend_cfg, "lat_max", 0.40)),
             "yaw_max": float(config_get(backend_cfg, "yaw_max", 0.60)),
-            "min_duration": float(config_get(backend_cfg, "min_duration", 1.5)),
-            "min_distance": float(config_get(backend_cfg, "min_distance", 0.08)),
-            "warmup_time": float(config_get(backend_cfg, "warmup_time", 0.6)),
-            "warmup_speed": float(config_get(backend_cfg, "warmup_speed", 0.15)),
+            "min_duration": min_duration,
+            "min_distance": min_distance,
+            "warmup_time": warmup_time,
+            "warmup_speed": warmup_speed,
             "settle_before_s": float(config_get(backend_cfg, "settle_before_s", 0.0)),
             "stop_hold_s": float(config_get(backend_cfg, "stop_hold_s", 0.4)),
             "stand_height": float(config_get(backend_cfg, "stand_height", 0.74)),
@@ -85,7 +143,16 @@ class GrootHttpDiscreteBackend:
             "verbose": bool(config_get(backend_cfg, "verbose", True)),
         }
         self._mover = StrictRemoteMover(ipc_url, timeout=timeout, **mover_kwargs)
-        self.log.info("Using GR00T HTTP discrete motion backend at %s", ipc_url)
+        self.log.info(
+            "Using GR00T HTTP discrete motion backend at %s (profile=%s, "
+            "min_duration=%.2f, min_distance=%.2f, warmup=%.2fs@%.2fm/s)",
+            ipc_url,
+            motion_profile,
+            min_duration,
+            min_distance,
+            warmup_time,
+            warmup_speed,
+        )
 
     def _ensure_ready(self):
         if not self.enabled or self._mover is None:

@@ -54,6 +54,10 @@ motion_backend:
   type: groot_http_discrete
   ipc_url: http://127.0.0.1:5001
   box_demo_module_path: /home/unitree/zihou/box_demo_1
+  # Runtime override written by box_demo_1/start_g1_onboard_nav.sh.
+  # precise: keep min_duration/min_distance; keyboard: use keyboard cruise speeds.
+  motion_profile: precise
+  profile_file: /tmp/groot_nav_motion_profile.json
   initialize_before_motion: true
   http_timeout: 2.0
   stand_height: 0.74

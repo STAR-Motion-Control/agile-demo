@@ -93,6 +93,15 @@ cd ~/zihou/box_demo_1
 bash start_g1_onboard_nav.sh
 ```
 
+默认 profile 是 `precise`，导航离散动作会保留 `min_duration/min_distance` 可靠小步逻辑。若要让导航指令使用和键盘更接近的巡航速度，启动时改为：
+
+```bash
+cd ~/zihou/box_demo_1
+bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
+```
+
+两种 profile 都保留线性运动前的 warm-up。`keyboard` 只关闭 `min_duration/min_distance` 对导航距离/角度的改写，使 `/nav/forward_cmd`、`/nav/rotate_cmd` 和 `/planned_action` 在主运动段使用 `0.40/0.20/0.25/0.40` 这组速度。
+
 这个脚本只启动：
 
 - merger
@@ -117,7 +126,12 @@ bash start_g1_onboard_nav.sh
 - 手动键盘验底座时，不要发 `/nav/relative_cmd` 或 `/nav/text_nav`。
 - 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r`；现场只保留 `space` 和 `o` 作为人工安全入口。
 
-ROS 导航信号和 HTTP bridge 使用同一组默认值：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`，统一站高 `0.74 m`。负距离后退会按 `0.20 m/s` 计算持续时间，不只依赖 adapter 夹限。
+ROS 导航信号和 HTTP bridge 使用同一组速度上限：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`，统一站高 `0.74 m`。实际执行 profile 由 `start_g1_onboard_nav.sh --nav-motion-profile` 决定：
+
+- `precise`：默认。保留 `min_duration=1.5`、`min_distance=0.08`，适合可靠小步，但主运动速度可能低于键盘速度。
+- `keyboard`：使用键盘同样巡航速度，关闭 `min_duration/min_distance`，适合对比键盘和导航姿态。
+
+两种模式都保留 warm-up。profile 会写入 `/tmp/groot_nav_motion_profile.json`，`nav_uat` 的 `motion_backend.py` 会在启动时读取。
 
 ## 5. 启动导航 ROS bridge
 
@@ -140,6 +154,8 @@ motion_backend:
   type: groot_http_discrete
   ipc_url: http://127.0.0.1:5001
   box_demo_module_path: /home/unitree/zihou/box_demo_1
+  motion_profile: precise
+  profile_file: /tmp/groot_nav_motion_profile.json
   stand_height: 0.74
   fwd_cruise: 0.40
   back_cruise: 0.20
