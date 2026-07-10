@@ -138,6 +138,8 @@ import time
 profile, path = sys.argv[1], sys.argv[2]
 payload = {
     "motion_profile": profile,
+    "taptap_optimized": os.environ.get("GROOT_NAV_TAPTAP_LIMITS", "0").lower()
+    in ("1", "true", "yes", "on"),
     "updated_at": time.time(),
     "note": "Read by nav_uat Node/motion_backend.py. precise keeps min_duration/min_distance; keyboard uses keyboard cruise speeds. Warm-up remains enabled in both modes.",
 }

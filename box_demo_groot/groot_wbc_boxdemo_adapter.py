@@ -22,6 +22,7 @@ import math
 import os
 import sys
 import time
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,11 @@ CMD_FILE = "/tmp/robojudo_ext_cmd.json"
 DEFAULT_BASE_HEIGHT = 0.74
 DEFAULT_MIN_HEIGHT = 0.40
 DEFAULT_MAX_HEIGHT = 0.80
+# vx 不对称硬限(2026-07-06 真机): 快速后退(0.4)保不住高度越走越低直至摔;
+# 后退安全上限 0.2 — 有意不开放 CLI(别改成旗标); 前进硬顶 1.0(--fwd-max 给
+# 更大会被压回并告警; 复跑 1.2 速度指标需临时改这个常量)。
+BACK_VX_MAX = 0.20
+FWD_VX_HARD = 1.00
 
 # GR00T-WBC auto-switches Balance<->Walk at ||[vx,vy,wz]|| < 0.05
 # (g1_gear_wbc_policy.py:223). A command inside (0, 0.05) makes the robot
@@ -66,6 +72,25 @@ def approach(current: float, target: float, max_delta: float) -> float:
     if target > current:
         return min(target, current + max_delta)
     return max(target, current - max_delta)
+
+
+def resolve_motion_limits(
+    fwd_max: float,
+    lat_max: float,
+    yaw_max: float,
+    *,
+    taptap: bool,
+    taptap_lat_max: float = 0.20,
+    taptap_yaw_max: float = 0.40,
+) -> tuple[float, float, float]:
+    """Apply gait-safe limits only for the explicit taptap launch path."""
+    fwd = min(float(fwd_max), FWD_VX_HARD)
+    lat = max(0.0, float(lat_max))
+    yaw = max(0.0, float(yaw_max))
+    if taptap:
+        lat = min(lat, max(0.0, float(taptap_lat_max)))
+        yaw = min(yaw, max(0.0, float(taptap_yaw_max)))
+    return fwd, lat, yaw
 
 
 def _yaw_from_quat(qw: float, qx: float, qy: float, qz: float) -> float:
@@ -139,7 +164,7 @@ def read_external_command(
         vy *= lat_max
         wz *= yaw_max
 
-    vx = clamp(vx, -fwd_max, fwd_max)
+    vx = clamp(vx, -BACK_VX_MAX, fwd_max)   # 后退恒 ≤0.2, 前进走 fwd_max
     vy = clamp(vy, -lat_max, lat_max)
     wz = clamp(wz, -yaw_max, yaw_max)
 
@@ -333,6 +358,49 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--fwd-max", type=float, default=0.50)
     p.add_argument("--lat-max", type=float, default=0.30)
     p.add_argument("--yaw-max", type=float, default=0.60)
+    p.add_argument("--taptap", action="store_true",
+                   help="停止回正踏步(参考宇树官方运控): 每段运动结束后原地踏步"
+                        " settle 秒恢复标准站姿+高度回站高, 段间清零开环漂移。"
+                        "测试版入口 start_g1_onboard_taptap.sh / _nav_taptap.sh")
+    p.add_argument("--taptap-recovery", default="legacy", choices=("legacy", "off"),
+                   help="legacy=保留旧的停止后方波踏步实验; off=仅使用taptap限幅，"
+                        "不注入自主恢复动作(优化版导航入口使用)")
+    p.add_argument("--taptap-settle-s", type=float, default=1.2,
+                   help="踏步回正窗口时长 s")
+    p.add_argument("--taptap-mode", default="wz", choices=("wz", "vx", "vx_taper"),
+                   help="踏步激励方式。sim round13/13b: wz(原地小转±方波)最优 — "
+                        "前后错位/脚间距/平移漂移三指标全胜, 仅 ~2° yaw 漂移")
+    p.add_argument("--taptap-cmd", type=float, default=None,
+                   help="踏步激励幅值 (缺省: wz 模式 0.15 rad/s, vx 模式 0.08 m/s;"
+                        " 都刚超 Walk 阈值 0.05, 净位移≈0)")
+    p.add_argument("--taptap-period-s", type=float, default=0.4,
+                   help="踏步激励交替周期 s")
+    p.add_argument("--taptap-debounce-s", type=float, default=0.35,
+                   help="停止多久后才开始回正(盖过键盘 auto-repeat 空窗)")
+    p.add_argument("--taptap-min-motion-s", type=float, default=0.4,
+                   help="运动短于此时长不触发回正(过滤指令毛刺)")
+    p.add_argument("--taptap-lat-max", type=float, default=0.20,
+                   help="taptap 路径横移上限 m/s; 标准路径不生效")
+    p.add_argument("--taptap-yaw-max", type=float, default=0.40,
+                   help="taptap 路径转向上限 rad/s; 标准路径不生效")
+    p.add_argument("--safety-trip-ticks", type=int, default=3,
+                   help="关节安全违规需连续 N 帧(50Hz)才触发停机。GR00T 原版单帧"
+                        "sys.exit — 7-07 实测后退落地冲击在下垂手臂激起单帧肘部 dq"
+                        "尖峰(双肘同时-11.4rad/s)被误杀; 单帧尖峰用安全动作跳过, "
+                        "连续超限才 DAMP 缓停(比原版瞬退断流安全)")
+    p.add_argument("--walk-height-floor", type=float, default=0.72,
+                   help="行走高度地板 m (0=关)。速度命令非零时: 命令高度低于地板"
+                        "→拒绝速度(打印提示); 高度仍在从低位恢复(slew)→先归零速度"
+                        "等高度到位再走 (= groot_mover 的 WALK_MIN_HEIGHT warmup 机制;"
+                        " sim round11: h<0.70 后退只走 60%% 距离、横移几乎不动)")
+    p.add_argument("--back-lean-gain", type=float, default=0.3,
+                   help="后退自动前倾增益 rad/(m/s), 0=关。默认 0.3 = sim 甜点"
+                        "(round10 backward_obscomp: 骨盆后仰/tilt/停稳振荡全改善), "
+                        "2026-07-06 真机确认后退稳后设为默认")
+    p.add_argument("--back-lean-max", type=float, default=0.15,
+                   help="前倾上限 rad (0.3增益 x 0.5m/s = 0.15)")
+    p.add_argument("--back-lean-rate", type=float, default=0.30,
+                   help="前倾变化速率上限 rad/s (渐入渐出)")
     p.add_argument("--stand-height", type=float, default=DEFAULT_BASE_HEIGHT)
     p.add_argument("--min-height", type=float, default=DEFAULT_MIN_HEIGHT)
     p.add_argument("--max-height", type=float, default=DEFAULT_MAX_HEIGHT)
@@ -432,9 +500,59 @@ def main() -> None:
 
     publisher = LowCmdRlPublisher(wbc_config=wbc_config, topic=args.publish_topic)
 
+    if float(args.fwd_max) > FWD_VX_HARD:
+        print(f"[WARN] --fwd-max {args.fwd_max:.2f} 超前进硬顶, 压回 {FWD_VX_HARD:.2f} m/s")
+    fwd_max_eff, lat_max_eff, yaw_max_eff = resolve_motion_limits(
+        args.fwd_max,
+        args.lat_max,
+        args.yaw_max,
+        taptap=bool(args.taptap),
+        taptap_lat_max=args.taptap_lat_max,
+        taptap_yaw_max=args.taptap_yaw_max,
+    )
+
+    # 安全监视防抖: env_type 改 "sim" 让 handle_violations 返回 shutdown_required
+    # 而不是单帧直接 sys.exit(1)(违规打印/停机由下面 adapter 自己防抖后接管)。
+    safety_trip = 0
+    if not args.disable_joint_safety:
+        try:
+            env.safety_monitor.env_type = "sim"
+        except Exception as exc:
+            print(f"[WARN] 无法接管 safety monitor 停机路径: {exc}")
+
+    # 后退自动前倾(vx<0 时腰pitch前倾弥补重心靠后)。机制 = 动作偏置+观测补偿:
+    # 腰pitch动作目标 += lean, 同时喂给策略的 obs["q"] 腰pitch -= lean, 策略
+    # 对偏置无感不会反补偿。sim 标定(round8-10): rpy 命令通道无效; 纯动作偏置
+    # 被策略从关节观测发现并对抗(骨盆更后仰+位移超冲); obscomp 全指标改善。
+    back_lean_gain = max(0.0, float(args.back_lean_gain))
+    lean_state = 0.0
+    waist_dof = None
+    waist_body_idx = -1
+    if back_lean_gain > 0.0:
+        waist_dof = getattr(robot_model, "joint_to_dof_index", {}).get("waist_pitch_joint")
+        try:
+            waist_body_idx = int(publisher.motor2joint[14])   # HG motor 14 = WaistPitch
+        except Exception:
+            waist_body_idx = -1
+        if waist_dof is None or waist_body_idx < 0:
+            print(f"[WARN] back-lean 已禁用: waist_pitch 不可寻址 "
+                  f"(dof={waist_dof}, body_idx={waist_body_idx}) — 检查 --enable-waist")
+            back_lean_gain = 0.0
+
+    # taptap 停止回正状态(--taptap 开启时用)
+    tap_amp = (float(args.taptap_cmd) if args.taptap_cmd is not None
+               else (0.15 if args.taptap_mode == "wz" else 0.08))
+    tap_motion_since = None
+    tap_zero_since = None
+    tap_last_motion_dur = 0.0
+    tap_until = 0.0
+    tap_t0 = 0.0
+    tap_start_sign = 1.0
+
     dt = 1.0 / float(args.hz)
     height_cmd = clamp(float(args.stand_height), args.min_height, args.max_height)
     last_print = 0.0
+    last_gate_print = 0.0
 
     pose_log = None
     if args.log_pose is not None:
@@ -450,8 +568,20 @@ def main() -> None:
     print(f"  interface:   {config.interface} ({config.env_type}), domain={args.domain}")
     print(f"  cmd file:    {args.cmd_file}")
     print(f"  publish:     {'DRY-RUN' if args.dry_run else args.publish_topic} @ {args.hz:.1f}Hz")
-    print(f"  limits:      fwd={args.fwd_max:.2f} lat={args.lat_max:.2f} yaw={args.yaw_max:.2f}")
+    print(f"  limits:      fwd={fwd_max_eff:.2f}(硬顶{FWD_VX_HARD:.1f}) "
+          f"back={BACK_VX_MAX:.2f}(固定) lat={lat_max_eff:.2f} yaw={yaw_max_eff:.2f}")
+    if back_lean_gain > 0.0:
+        print(f"  back-lean:   gain={back_lean_gain:.2f} rad/(m/s) "
+              f"max={args.back_lean_max:.2f} rate={args.back_lean_rate:.2f} (obscomp)")
+    if args.taptap and args.taptap_recovery == "legacy":
+        print(f"  taptap:      ON — {args.taptap_mode} 停止回正踏步 "
+              f"{args.taptap_settle_s:.1f}s ±{tap_amp:.2f} "
+              f"周期{args.taptap_period_s:.1f}s (防抖{args.taptap_debounce_s:.2f}s)")
+    elif args.taptap:
+        print("  taptap:      limits ON; legacy stop-recovery OFF")
     print(f"  height:      {args.min_height:.2f}..{args.max_height:.2f}m, rate={args.height_rate:.2f}m/s")
+    if float(args.walk_height_floor) > 0.0:
+        print(f"  walk-floor:  {args.walk_height_floor:.2f}m (低位拒走/恢复中warmup拦速度)")
     print(f"  policy:      {'auto-activated' if not args.no_auto_activate_policy else 'current-q hold'}")
     print("  merger:      keep merge_lowcmd_arm_sdk.py running to publish final rt/lowcmd")
     print("=" * 72)
@@ -466,13 +596,107 @@ def main() -> None:
                 cmd_file=args.cmd_file,
                 last_height=height_cmd,
                 stale_s=float(args.cmd_stale_s),
-                fwd_max=float(args.fwd_max),
-                lat_max=float(args.lat_max),
-                yaw_max=float(args.yaw_max),
+                fwd_max=fwd_max_eff,
+                lat_max=lat_max_eff,
+                yaw_max=yaw_max_eff,
                 min_height=float(args.min_height),
                 max_height=float(args.max_height),
             )
-            height_cmd = approach(height_cmd, cmd.height, float(args.height_rate) * dt)
+            # 行走高度地板(warmup): 低位不走, 恢复到位才放行速度
+            # (必须在 taptap 之前: 被 GATE 拦下的"假运动"不算运动, 蹲位不误触发回正)
+            floor = float(args.walk_height_floor)
+            wants_motion = (abs(cmd.vx) + abs(cmd.vy) + abs(cmd.wz)) > 1e-3
+            if floor > 0.0 and wants_motion and height_cmd < floor - 0.01:
+                now_g = time.monotonic()
+                if now_g - last_gate_print >= 2.0:
+                    reason = ("命令高度低于地板" if cmd.height < floor
+                              else "高度恢复中(warmup)")
+                    print(f"[GATE] 速度已拦: {reason} "
+                          f"(height_cmd={height_cmd:.2f} < floor={floor:.2f}) — "
+                          f"升高度(r键回站立)后放行")
+                    last_gate_print = now_g
+                cmd = dataclasses.replace(cmd, vx=0.0, vy=0.0, wz=0.0)
+
+            # --- taptap 停止回正: 显式停止(fresh 零命令)防抖后注入原地踏步窗.
+            # 对抗审查修复(7-08): ①运动判定用 GATE 后命令 + 开窗要求高度在地板上
+            # (蹲位/被拦的假运动不触发, 不再强制从蹲位站起); ②窗长取偶数个半周期
+            # + 起始方向轮换(激励积分净零, 不再每次+3°); ③stale/非 RL_FULL 不触发
+            # 不注入(命令黑箱期绝不自主动作); ④毛刺段不覆盖待回正记录, 被打断的
+            # 回正下次停止后补做(完成才消费).
+            tap_active = False
+            if args.taptap and args.taptap_recovery == "legacy":
+                now_t = time.monotonic()
+                user_moving = (abs(cmd.vx) + abs(cmd.vy) + abs(cmd.wz)) > 1e-3
+                bad_state = cmd.estop or cmd.fsm != "RL_FULL"
+                if user_moving or bad_state:
+                    if tap_until > 0.0:
+                        print("[TAPTAP] 中断回正 (新命令/状态切换)")
+                    tap_until = 0.0
+                    tap_zero_since = None
+                    if bad_state:
+                        tap_motion_since = None
+                        tap_last_motion_dur = 0.0
+                    else:
+                        tap_motion_since = tap_motion_since or now_t
+                else:
+                    if tap_motion_since is not None:          # 运动->停 过渡
+                        seg = now_t - tap_motion_since
+                        tap_motion_since = None
+                        if cmd.fresh:                         # 显式停止命令才武装
+                            if seg >= float(args.taptap_min_motion_s):
+                                tap_last_motion_dur = seg     # 毛刺段不覆盖旧记录
+                            tap_zero_since = now_t
+                        else:                                 # 命令黑箱(stale): 不回正
+                            tap_last_motion_dur = 0.0
+                            tap_zero_since = None
+                    height_ok = (floor <= 0.0 or height_cmd >= floor - 0.005)
+                    if (tap_until == 0.0 and tap_zero_since is not None
+                            and now_t - tap_zero_since >= float(args.taptap_debounce_s)
+                            and tap_last_motion_dur >= float(args.taptap_min_motion_s)
+                            and height_ok):
+                        period = max(1e-3, float(args.taptap_period_s))
+                        n_half = max(2, int(round(float(args.taptap_settle_s) / period)))
+                        n_half += n_half % 2                  # 偶数半周期 -> 净激励零
+                        tap_start_sign = -tap_start_sign      # 相邻回正起始方向轮换
+                        tap_until = now_t + n_half * period
+                        tap_t0 = now_t
+                        print(f"[TAPTAP] 回正: {args.taptap_mode} 踏步 "
+                              f"{n_half * period:.1f}s (±{tap_amp:.2f}, "
+                              f"{n_half}个半周期) 高度回 {args.stand_height:.2f}")
+                    if tap_until > 0.0:
+                        if now_t < tap_until:
+                            tap_active = True
+                            period = max(1e-3, float(args.taptap_period_s))
+                            ph = int((now_t - tap_t0) / period) % 2
+                            amp = tap_amp
+                            if args.taptap_mode == "vx_taper":
+                                amp *= (1.0 - 0.3 * (now_t - tap_t0)
+                                        / max(1e-6, tap_until - tap_t0))
+                            sgn_amp = tap_start_sign * (amp if ph == 0 else -amp)
+                            if args.taptap_mode == "wz":
+                                cmd = dataclasses.replace(cmd, vx=0.0, vy=0.0,
+                                                          wz=sgn_amp)
+                            else:
+                                cmd = dataclasses.replace(cmd, vx=sgn_amp, vy=0.0,
+                                                          wz=0.0)
+                        else:
+                            tap_until = 0.0
+                            tap_zero_since = None
+                            tap_last_motion_dur = 0.0         # 完成才消费; 打断保留补做
+                            print("[TAPTAP] 回正完成")
+
+            height_cmd = approach(
+                height_cmd,
+                float(args.stand_height) if tap_active else cmd.height,
+                float(args.height_rate) * dt)
+
+            lean_target = 0.0
+            if (back_lean_gain > 0.0 and not tap_active and not cmd.estop
+                    and cmd.fsm not in ("DAMP", "LIMP")):
+                lean_target = clamp(back_lean_gain * max(0.0, -cmd.vx),
+                                    0.0, float(args.back_lean_max))
+            lean_state = approach(lean_state, lean_target,
+                                  float(args.back_lean_rate) * dt)
 
             try:
                 obs = env.observe()
@@ -485,6 +709,13 @@ def main() -> None:
                 continue
 
             low_state = _latest_low_state(env)
+
+            if lean_state > 1e-4 and waist_dof is not None:
+                # 观测补偿: 策略看到的腰pitch = 实测值 - 偏置(即它自己命令的角度)
+                q_comp = np.array(obs["q"], copy=True)
+                q_comp[waist_dof] -= lean_state
+                obs = dict(obs)
+                obs["q"] = q_comp
 
             if pose_log is not None:
                 try:
@@ -528,19 +759,44 @@ def main() -> None:
 
                 if not args.disable_joint_safety:
                     try:
-                        action = env.safety_monitor.handle_violations(obs, action)["action"]
+                        sres = env.safety_monitor.handle_violations(obs, action)
+                        action = sres["action"]
+                        if sres.get("shutdown_required"):
+                            safety_trip += 1
+                            vio = getattr(env.safety_monitor, "violations", [])
+                            print(f"[SAFETY] 违规帧 {safety_trip}/{args.safety_trip_ticks}: "
+                                  + "; ".join(f"{v.get('joint')}={v.get('value'):+.1f}rad/s"
+                                              for v in vio if v.get("critical", True)))
+                            if safety_trip >= int(args.safety_trip_ticks):
+                                print("[SAFETY] 连续超限 — DAMP 缓停后退出 "
+                                      "(单帧尖峰不会走到这里)")
+                                for _ in range(max(1, int(float(args.shutdown_s) * args.hz))):
+                                    ls = _latest_low_state(env)
+                                    if not args.dry_run and ls is not None:
+                                        publisher.publish_damping(ls, args.damping_kd)
+                                    time.sleep(dt)
+                                sys.exit(1)
+                        else:
+                            safety_trip = 0
+                    except SystemExit:
+                        raise
                     except Exception as exc:
                         print(f"[WARN] joint safety monitor failed; using raw action: {exc}")
 
                 body_q = robot_model.get_body_actuated_joints(action["q"])
+                if lean_state > 1e-4 and waist_body_idx >= 0:
+                    body_q = np.array(body_q, copy=True)
+                    body_q[waist_body_idx] += lean_state
                 if not args.dry_run:
                     publisher.publish_body_targets(body_q, low_state=low_state)
 
             now = time.monotonic()
             if now - last_print >= float(args.print_every_s):
+                lean_s = f" lean={lean_state:.3f}" if lean_state > 1e-4 else ""
                 print(
                     f"[GR00T-WBC] fsm={cmd.fsm:8s} fresh={int(cmd.fresh)} "
                     f"cmd=({cmd.vx:+.2f},{cmd.vy:+.2f},{cmd.wz:+.2f},h={height_cmd:.2f})"
+                    f"{lean_s}"
                 )
                 last_print = now
 
