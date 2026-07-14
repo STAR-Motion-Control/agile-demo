@@ -100,7 +100,9 @@ cd ~/zihou/box_demo_1
 bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 ```
 
-两种 profile 都保留线性运动前的 warm-up。`keyboard` 只关闭 `min_duration/min_distance` 对导航距离/角度的改写，使 `/nav/forward_cmd`、`/nav/rotate_cmd` 和 `/planned_action` 在主运动段使用 `0.40/0.20/0.25/0.40` 这组速度。
+两种 profile 都继承启动脚本的 warm-up 配置，当前默认关闭。`keyboard` 只关闭
+`min_duration/min_distance` 对导航距离/角度的改写，使 `/nav/forward_cmd`、
+`/nav/rotate_cmd` 和 `/planned_action` 在主运动段使用 `0.40/0.20/0.25/0.40` 这组巡航速度。
 
 这个脚本只启动：
 
@@ -126,12 +128,64 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 - 手动键盘验底座时，不要发 `/nav/relative_cmd` 或 `/nav/text_nav`。
 - 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r`；现场只保留 `space` 和 `o` 作为人工安全入口。
 
-ROS 导航信号和 HTTP bridge 使用同一组速度上限：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`，统一站高 `0.74 m`。实际执行 profile 由 `start_g1_onboard_nav.sh --nav-motion-profile` 决定：
+ROS 导航信号和 HTTP bridge 使用同一组巡航速度：前进 `0.40 m/s`、后退
+`0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`。adapter 上限为
+`0.50/0.20/0.30/0.60`，统一站高 `0.76 m`。实际执行 profile 由
+`start_g1_onboard_nav.sh --nav-motion-profile` 决定：
 
-- `precise`：默认。保留 `min_duration=1.0`、`min_distance=0.08`、`v_floor=0.10`，适合可靠小步，但主运动速度可能低于键盘速度。
+- `precise`：默认。保留 `min_duration=1.5`、`min_distance=0.08`、`v_floor=0.12`，适合可靠小步，但主运动速度可能低于键盘速度。
 - `keyboard`：使用键盘同样巡航速度，关闭 `min_duration/min_distance`，适合对比键盘和导航姿态。
 
-两种模式都保留 warm-up。profile 会写入 `/tmp/groot_nav_motion_profile.json`，`nav_uat` 的 `motion_backend.py` 会在启动时读取。
+两种模式都使用同一个 warm-up 开关，默认关闭。profile 会写入
+`/tmp/groot_nav_motion_profile.json`，`nav_uat` 的 `motion_backend.py` 会在启动时读取。
+
+### 4.1 自适应踏步回正测试版
+
+普通 `start_g1_onboard_nav.sh` 保留当前稳定逻辑。只有现场人员显式运行下面的 wrapper，
+才启用自适应踏步回正：
+
+```bash
+cd ~/zihou/box_demo_1
+bash start_g1_onboard_nav_taptap.sh
+```
+
+adapter 默认使用固定策略站姿：足间距 `0.24 m`、有符号前后脚差 `0.08 m`，不会用启动时的
+吊架站姿覆盖这两个标准。第一条运动到来时会先检查当前站姿；若异常，先拦住该指令并回正，
+完成后再执行该指令。只有现场确认初始站姿正常时，才可显式使用 `--taptap-auto-calibrate`。
+
+一次有效运动正常结束后，adapter 在 `0.35 s` 防抖窗的最后 `0.12 s` 采样。健康站姿的判断会在
+mover 原有 `0.4 s` 停止保持内完成，不增加普通路径等待。只有满足以下任一条件才执行
+`1.60 s`、`0.08 m/s` 的前后对称踏步：
+
+- 足间距不在 `0.205..0.275 m` 范围内；
+- 左右脚有符号前后差偏离策略标准值 `0.08 m` 超过 `0.08 m`；
+- 两脚相对偏航角超过 `0.12 rad`（约 `6.9 deg`）。
+
+恢复第一步的方向由脚差方向决定，随后每 `0.40 s` 反向，以减少净位移。adapter 通过
+`/tmp/groot_taptap_status.json` 发布检查/回正状态，HTTP `/status` 同步返回该状态。回正期间 HTTP
+动作计时暂停，mover 只在状态仍为 active 时条件等待，因此首条导航距离不会被回正时间吞掉，健康路径也不会
+固定多等 `1.8 s`。`DAMP`、急停或显式不允许回正的新命令会立即取消回正；状态文件超过 `1 s` 未刷新按失效
+处理，避免旧状态永久阻塞。
+
+键盘和导航使用同一个 IPC 判据。键盘 `space`、导航动作自然结束会允许检查；键盘 `o`、HTTP
+`/damp`、人工 `/stop` 默认不允许检查。普通版和 `_taptap` 版的 mover 都使用 `0.4 s` 停止保持，
+不再修改动作间 Balance 停留时间。
+
+注意：旧 A/B 使用启动站姿作为 reference，不再作为新版验收依据。新版必须在控制的异常初始脚位上重新进行
+MuJoCo A/B 验证，通过前不进入真机运动测试。当前仿真结果保存在
+`/home/unitree/zihou/box_demo_1/three_tests/sim_results/adaptive_taptap_v3.json`。
+
+调参入口均为 `_taptap.sh` 后追加的 adapter 参数：
+
+```bash
+bash start_g1_onboard_nav_taptap.sh \
+  --taptap-width-margin 0.035 \
+  --taptap-reference-stagger 0.08 \
+  --taptap-stagger-limit 0.08 \
+  --taptap-yaw-limit 0.12 \
+  --taptap-adaptive-speed 0.08 \
+  --taptap-adaptive-s 1.60
+```
 
 ## 5. 启动导航 ROS bridge
 
@@ -147,7 +201,8 @@ cd ~/workspace/nav_uat/src
 python run_ros.py
 ```
 
-确认 `~/workspace/nav_uat/src/config.yaml` 中：
+`run_ros.py` 当前通过 Hydra 加载 `~/workspace/nav_uat/src/config_bk.yaml`；`config.yaml`
+是宇树自带运控对照配置，不要混用。确认 `config_bk.yaml` 中：
 
 ```yaml
 motion_backend:
@@ -156,14 +211,14 @@ motion_backend:
   box_demo_module_path: /home/unitree/zihou/box_demo_1
   motion_profile: precise
   profile_file: /tmp/groot_nav_motion_profile.json
-  stand_height: 0.74
+  stand_height: 0.76
   fwd_cruise: 0.40
   back_cruise: 0.20
   lat_cruise: 0.25
   yaw_cruise: 0.40
-  min_duration: 1.0
+  min_duration: 1.5
   min_distance: 0.08
-  v_floor: 0.10
+  v_floor: 0.12
   w_floor: 0.10
 ```
 

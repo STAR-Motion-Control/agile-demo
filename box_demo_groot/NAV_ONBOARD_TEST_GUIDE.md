@@ -173,7 +173,7 @@ mover 原有 `0.4 s` 停止保持内完成，不增加普通路径等待。只�
 
 注意：旧 A/B 使用启动站姿作为 reference，不再作为新版验收依据。新版必须在控制的异常初始脚位上重新进行
 MuJoCo A/B 验证，通过前不进入真机运动测试。当前仿真结果保存在
-`three_tests/sim_results/adaptive_taptap_v3.json`。
+`/home/unitree/zihou/box_demo_1/three_tests/sim_results/adaptive_taptap_v3.json`。
 
 调参入口均为 `_taptap.sh` 后追加的 adapter 参数：
 
@@ -201,7 +201,8 @@ cd ~/workspace/nav_uat/src
 python run_ros.py
 ```
 
-确认 `~/workspace/nav_uat/src/config.yaml` 中：
+`run_ros.py` 当前通过 Hydra 加载 `~/workspace/nav_uat/src/config_bk.yaml`；`config.yaml`
+是宇树自带运控对照配置，不要混用。确认 `config_bk.yaml` 中：
 
 ```yaml
 motion_backend:

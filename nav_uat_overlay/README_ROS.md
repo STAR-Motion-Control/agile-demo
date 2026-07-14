@@ -214,7 +214,9 @@ ros2 topic pub --once /nav/relative_cmd std_msgs/msg/String "{data: '0.1 10'}"
 
 ### 6.5 Motion backend
 
-`src/config.yaml` selects the lower-body backend:
+For the current G001 GR00T test, `run_ros.py` loads `src/config_bk.yaml` through
+Hydra (`config_name="config_bk"`). `src/config.yaml` is the Unitree-controller
+comparison configuration. The selected GR00T config contains:
 
 ```yaml
 motion_backend:
