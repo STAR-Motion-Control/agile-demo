@@ -30,6 +30,7 @@ from typing import Any
 from adaptive_taptap import AdaptiveTapTapController, StanceMetrics
 
 CMD_FILE = "/tmp/robojudo_ext_cmd.json"
+TAPTAP_STATUS_FILE = "/tmp/groot_taptap_status.json"
 
 DEFAULT_BASE_HEIGHT = 0.74
 DEFAULT_MIN_HEIGHT = 0.40
@@ -69,6 +70,31 @@ class ExternalCommand:
 
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
+
+
+def write_taptap_status(
+    path: Path,
+    controller: AdaptiveTapTapController,
+    *,
+    enabled: bool,
+    event: str | None = None,
+    stance: StanceMetrics | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "enabled": bool(enabled),
+        "state": controller.state if enabled else controller.IDLE,
+        "active": bool(enabled and controller.state != controller.IDLE),
+        "event": event,
+        "timestamp": time.time(),
+    }
+    if stance is not None:
+        payload["stance"] = dataclasses.asdict(stance)
+    path = path.expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f)
+    os.replace(tmp, path)
 
 
 def approach(current: float, target: float, max_delta: float) -> float:
@@ -363,10 +389,12 @@ def measure_stance(robot_model, q) -> StanceMetrics:
     left = robot_model.frame_placement("left_ankle_roll_link")
     right = robot_model.frame_placement("right_ankle_roll_link")
     relative = pelvis.rotation.T @ (left.translation - right.translation)
+    foot_rotation = left.rotation.T @ right.rotation
     return StanceMetrics(
         width=abs(float(relative[1])),
         stagger=float(relative[0]),
         height_delta=abs(float(relative[2])),
+        yaw_error=math.atan2(float(foot_rotation[1, 0]), float(foot_rotation[0, 0])),
     )
 
 
@@ -379,6 +407,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--interface", "--iface", dest="interface", default=os.environ.get("UNITREE_DDS_INTERFACE", "real"))
     p.add_argument("--domain", type=int, default=0)
     p.add_argument("--cmd-file", type=Path, default=Path(CMD_FILE))
+    p.add_argument("--taptap-status-file", type=Path, default=Path(TAPTAP_STATUS_FILE),
+                   help="自适应回正状态文件，供HTTP/local mover条件等待")
     p.add_argument("--publish-topic", default="rt/lowcmd_rl")
     p.add_argument("--hz", type=float, default=50.0)
     p.add_argument("--cmd-stale-s", type=float, default=0.40)
@@ -407,11 +437,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--taptap-min-motion-s", type=float, default=0.4,
                    help="运动短于此时长不触发回正(过滤指令毛刺)")
     p.add_argument("--taptap-reference-width", type=float, default=0.24,
-                   help="自适应回正的初始标准足间距 m; 启动稳定站立后自动标定")
+                   help="自适应回正的固定标准足间距 m")
+    p.add_argument("--taptap-reference-stagger", type=float, default=0.08,
+                   help="自适应回正的固定标准前后脚差 m")
+    p.add_argument("--taptap-auto-calibrate", action="store_true",
+                   help="仅已确认初始站姿正常时手动启用自动标定")
     p.add_argument("--taptap-width-margin", type=float, default=0.035,
                    help="实际足间距比标准值窄超过该值时触发回正 m")
     p.add_argument("--taptap-stagger-limit", type=float, default=0.08,
                    help="双脚前后错位触发阈值 m")
+    p.add_argument("--taptap-yaw-limit", type=float, default=0.12,
+                   help="双脚相对偏航角触发阈值 rad")
     p.add_argument("--taptap-height-delta-max", type=float, default=0.03,
                    help="双脚高度差超过该值时仍视为摆动期, 暂不判断 m")
     p.add_argument("--taptap-confirm-s", type=float, default=0.12,
@@ -584,8 +620,10 @@ def main() -> None:
     tap_start_sign = 1.0
     adaptive_taptap = AdaptiveTapTapController(
         reference_width=args.taptap_reference_width,
+        reference_stagger=args.taptap_reference_stagger,
         width_margin=args.taptap_width_margin,
         stagger_limit=args.taptap_stagger_limit,
+        yaw_limit=args.taptap_yaw_limit,
         max_height_delta=args.taptap_height_delta_max,
         debounce_s=args.taptap_debounce_s,
         confirm_s=args.taptap_confirm_s,
@@ -593,8 +631,16 @@ def main() -> None:
         recovery_s=args.taptap_adaptive_s,
         recovery_speed=args.taptap_adaptive_speed,
         phase_s=args.taptap_period_s,
+        auto_calibrate=args.taptap_auto_calibrate,
     )
     last_stance = None
+    adaptive_enabled = bool(args.taptap and args.taptap_recovery == "adaptive")
+    last_taptap_status_write = 0.0
+    write_taptap_status(
+        args.taptap_status_file,
+        adaptive_taptap,
+        enabled=adaptive_enabled,
+    )
 
     dt = 1.0 / float(args.hz)
     height_cmd = clamp(float(args.stand_height), args.min_height, args.max_height)
@@ -740,11 +786,24 @@ def main() -> None:
                 cmd, tap_active, tap_event = adaptive_taptap.update(
                     time.monotonic(), cmd, last_stance
                 )
+                now_status = time.monotonic()
+                if tap_event is not None or now_status - last_taptap_status_write >= 0.10:
+                    write_taptap_status(
+                        args.taptap_status_file,
+                        adaptive_taptap,
+                        enabled=True,
+                        event=tap_event,
+                        stance=last_stance,
+                    )
+                    last_taptap_status_write = now_status
                 if tap_event == "started":
                     print(f"[TAPTAP] 站姿异常, 开始自适应回正 "
                           f"(width={last_stance.width:.3f}m "
                           f"stagger={last_stance.stagger:.3f}m "
+                          f"foot_yaw={last_stance.yaw_error:.3f}rad "
                           f"reference={adaptive_taptap.reference_width:.3f}m)")
+                elif tap_event == "checking_initial":
+                    print("[TAPTAP] 初始站姿异常, 拦住首条运动并检查回正")
                 elif tap_event == "healthy":
                     print(f"[TAPTAP] 站姿正常, 跳过回正 "
                           f"(reference={adaptive_taptap.reference_width:.3f}m)")
@@ -891,6 +950,16 @@ def main() -> None:
                         publisher.publish_damping(low_state, args.damping_kd)
                 time.sleep(dt)
     finally:
+        try:
+            write_taptap_status(
+                args.taptap_status_file,
+                adaptive_taptap,
+                enabled=False,
+                event="shutdown",
+                stance=last_stance,
+            )
+        except Exception as exc:
+            print(f"[WARN] 无法清理 taptap 状态文件: {exc}")
         try:
             env.close()
         except Exception:

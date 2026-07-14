@@ -51,13 +51,12 @@ def arm_stop(c, stance):
 def test_healthy_stop_skips_recovery():
     c = controller()
     arm_stop(c, GOOD)
-    c.update(0.41, Cmd(allow_recovery=True), GOOD)
-    out, active, event = c.update(0.51, Cmd(allow_recovery=True), GOOD)
+    out, active, event = c.update(0.41, Cmd(allow_recovery=True), GOOD)
     assert not active and event == "healthy" and out.vx == 0.0
 
 
 def test_zero_stance_calibrates_signed_reference():
-    c = AdaptiveTapTapController(calibration_s=0.20)
+    c = AdaptiveTapTapController(calibration_s=0.20, auto_calibrate=True)
     neutral = StanceMetrics(width=0.25, stagger=0.04, height_delta=0.0)
     for now in (0.0, 0.10, 0.21):
         c.update(now, Cmd(allow_recovery=True), neutral)
@@ -66,11 +65,64 @@ def test_zero_stance_calibrates_signed_reference():
     assert not c.stance_bad(neutral)
 
 
+def test_width_and_foot_yaw_are_checked_against_canonical_stance():
+    c = controller()
+    assert c.stance_bad(StanceMetrics(0.28, 0.03, 0.0))
+    assert c.stance_bad(StanceMetrics(0.24, 0.03, 0.0, yaw_error=0.13))
+    assert not c.stance_bad(StanceMetrics(0.24, 0.03, 0.0, yaw_error=0.05))
+
+
+def test_bad_startup_is_recovered_before_first_motion():
+    c = controller()
+    pending = Cmd(vx=0.4, allow_recovery=True)
+    out, active, event = c.update(0.0, pending, BAD)
+    assert not active and event == "checking_initial" and out.vx == 0.0
+    out, active, event = c.update(0.21, pending, BAD)
+    assert active and event == "started" and out.vx == 0.0
+
+
+def test_bad_startup_never_overwrites_fixed_reference():
+    c = AdaptiveTapTapController(reference_width=0.24, reference_stagger=0.0)
+    for now in (0.0, 0.2, 0.4):
+        c.update(now, Cmd(allow_recovery=True), BAD)
+    assert c.reference_width == 0.24
+    assert c.reference_stagger == 0.0
+
+
+def test_healthy_motion_command_values_are_unchanged():
+    c = controller()
+    commands = (
+        (0.0, Cmd(vx=0.4, allow_recovery=True)),
+        (0.5, Cmd(vx=0.4, allow_recovery=True)),
+        (0.6, Cmd(allow_recovery=True)),
+        (0.71, Cmd(allow_recovery=True)),
+        (0.81, Cmd(allow_recovery=True)),
+    )
+    outputs = [c.update(now, cmd, GOOD)[0] for now, cmd in commands]
+    assert [(cmd.vx, cmd.vy, cmd.wz) for cmd in outputs] == [
+        (0.4, 0.0, 0.0),
+        (0.4, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+        (0.0, 0.0, 0.0),
+    ]
+
+
+def test_armed_recovery_survives_stale_zero_but_not_explicit_stop():
+    c = controller()
+    arm_stop(c, BAD)
+    _, active, event = c.update(
+        0.41, Cmd(fresh=False, allow_recovery=True), BAD
+    )
+    assert active and event == "started"
+    out, active, event = c.update(0.60, Cmd(allow_recovery=False), BAD)
+    assert not active and event == "cancelled" and out.vx == 0.0
+
+
 def test_bad_stance_runs_symmetric_recovery():
     c = controller()
     arm_stop(c, BAD)
-    c.update(0.41, Cmd(allow_recovery=True), BAD)
-    _, active, event = c.update(0.51, Cmd(allow_recovery=True), BAD)
+    _, active, event = c.update(0.41, Cmd(allow_recovery=True), BAD)
     assert active and event == "started"
     values = []
     for now in (0.52, 0.72, 0.92, 1.12):
@@ -91,7 +143,6 @@ def test_safety_and_unmarked_zero_never_recover():
 
     arm_stop(c, BAD)
     c.update(0.41, Cmd(allow_recovery=True), BAD)
-    c.update(0.51, Cmd(allow_recovery=True), BAD)
     out, active, event = c.update(
         0.60, Cmd(fsm="DAMP", estop=True, fresh=True), BAD
     )
@@ -102,7 +153,6 @@ def test_new_normal_command_is_held_until_recovery_finishes():
     c = controller()
     arm_stop(c, BAD)
     c.update(0.41, Cmd(allow_recovery=True), BAD)
-    c.update(0.51, Cmd(allow_recovery=True), BAD)
     pending = Cmd(vy=0.2, allow_recovery=True)
     out, active, _ = c.update(0.60, pending, BAD)
     assert active and out.vy == 0.0

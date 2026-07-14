@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlparse
 
 
 LEGACY_CMD_FILE = "/tmp/robojudo_ext_cmd.json"
+TAPTAP_STATUS_FILE = "/tmp/groot_taptap_status.json"
 DEFAULT_STATE_DIR = "/tmp/agile_sim2sim"
 STAND_HEIGHT = 0.76
 MIN_HEIGHT = 0.40
@@ -36,6 +37,23 @@ _motion_stop: threading.Event | None = None
 _backend = "command-json"
 _state_dir = Path(DEFAULT_STATE_DIR)
 _legacy_cmd_file = LEGACY_CMD_FILE
+_taptap_status_file = TAPTAP_STATUS_FILE
+
+
+def read_taptap_status(max_age_s: float = 1.0) -> dict:
+    try:
+        with open(_taptap_status_file, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        age = max(0.0, time.time() - float(payload.get("timestamp", 0.0)))
+        payload["age_s"] = age
+        if age > max_age_s:
+            payload["active"] = False
+            payload["stale"] = True
+        return payload
+    except FileNotFoundError:
+        return {"enabled": False, "active": False, "state": "IDLE", "missing": True}
+    except Exception as exc:
+        return {"enabled": False, "active": False, "state": "IDLE", "error": repr(exc)}
 
 
 def clamp(v: float, lo: float, hi: float) -> float:
@@ -113,7 +131,16 @@ def read_status() -> dict:
         current = None
     except Exception as exc:
         current = {"error": repr(exc)}
-    return {"ok": True, "backend": _backend, "cmd_file": path, "current": current}
+    with _motion_lock:
+        motion_active = _motion_stop is not None
+    return {
+        "ok": True,
+        "backend": _backend,
+        "cmd_file": path,
+        "current": current,
+        "motion_active": motion_active,
+        "taptap": read_taptap_status(),
+    }
 
 
 def get_float(qs: dict[str, list[str]], key: str, default: float) -> float:
@@ -158,9 +185,15 @@ def start_motion(
         _motion_stop = stop_event
 
     def _worker() -> None:
-        deadline = time.time() + duration
+        remaining = duration
+        last_tick = time.monotonic()
         try:
-            while time.time() < deadline and not stop_event.is_set():
+            while remaining > 0.0 and not stop_event.is_set():
+                now = time.monotonic()
+                elapsed = max(0.0, now - last_tick)
+                last_tick = now
+                if not read_taptap_status().get("active", False):
+                    remaining -= elapsed
                 write_cmd(fsm, vx, vy, wz, height, allow_recovery=True)
                 time.sleep(refresh_s)
             if not stop_event.is_set():
@@ -270,7 +303,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    global _backend, _state_dir, _legacy_cmd_file
+    global _backend, _state_dir, _legacy_cmd_file, _taptap_status_file
     global STAND_HEIGHT, MIN_HEIGHT, MAX_HEIGHT
     parser = argparse.ArgumentParser(description="HTTP IPC server for AGILE box_demo_2")
     parser.add_argument("--host", default="0.0.0.0")
@@ -278,6 +311,7 @@ def main() -> None:
     parser.add_argument("--backend", choices=("command-json", "legacy-ipc"), default="command-json")
     parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
     parser.add_argument("--legacy-cmd-file", default=LEGACY_CMD_FILE)
+    parser.add_argument("--taptap-status-file", default=TAPTAP_STATUS_FILE)
     parser.add_argument("--stand-height", type=float, default=STAND_HEIGHT)
     parser.add_argument("--min-height", type=float, default=MIN_HEIGHT)
     parser.add_argument("--max-height", type=float, default=MAX_HEIGHT)
@@ -291,6 +325,7 @@ def main() -> None:
     _state_dir = Path(args.state_dir).expanduser()
     _state_dir.mkdir(parents=True, exist_ok=True)
     _legacy_cmd_file = args.legacy_cmd_file
+    _taptap_status_file = args.taptap_status_file
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"AGILE box_demo HTTP IPC server: http://{args.host}:{args.port}")
     print(f"backend={_backend}")

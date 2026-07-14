@@ -250,8 +250,6 @@ payload = {
     "schema_version": 2,
     "source": "start_g1_onboard_nav.sh",
     "motion_profile": motion_profile,
-    "taptap_recovery": os.environ.get("GROOT_TAPTAP_ADAPTIVE", "0").lower()
-    in ("1", "true", "yes", "on"),
     "stand_height": float(stand_height),
     "walk_min_height": float(walk_floor),
     "warmup_enabled": warmup_mode == "on",

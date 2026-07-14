@@ -88,10 +88,6 @@ def main():
     last_motion_key = 0.0
     dirty = True
     dt = 1.0 / args.refresh_hz
-    adaptive_stop_hold_s = (
-        2.20 if os.environ.get("GROOT_TAPTAP_ADAPTIVE") == "1" else 0.0
-    )
-    recovery_keepalive_until = 0.0
 
     print("=" * 64)
     print("AGILE keyboard control -> /tmp/robojudo_ext_cmd.json")
@@ -113,27 +109,21 @@ def main():
                 if ch == "w":
                     vx, vy, wz = args.vx, 0.0, 0.0
                     last_motion_key = time.time()
-                    recovery_keepalive_until = 0.0
                 elif ch == "s":
                     vx, vy, wz = -args.vx, 0.0, 0.0
                     last_motion_key = time.time()
-                    recovery_keepalive_until = 0.0
                 elif ch == "a":
                     vx, vy, wz = 0.0, args.vy, 0.0
                     last_motion_key = time.time()
-                    recovery_keepalive_until = 0.0
                 elif ch == "d":
                     vx, vy, wz = 0.0, -args.vy, 0.0
                     last_motion_key = time.time()
-                    recovery_keepalive_until = 0.0
                 elif ch == "q":
                     vx, vy, wz = 0.0, 0.0, args.wz
                     last_motion_key = time.time()
-                    recovery_keepalive_until = 0.0
                 elif ch == "e":
                     vx, vy, wz = 0.0, 0.0, -args.wz
                     last_motion_key = time.time()
-                    recovery_keepalive_until = 0.0
                 elif ch == "z":
                     height = clamp(height - args.height_step, args.min_height, args.max_height)
                     dirty = True
@@ -147,8 +137,6 @@ def main():
                     height = clamp(args.stand_height, args.min_height, args.max_height)
                     dirty = True
                 elif ch == " ":
-                    if vx != 0.0 or vy != 0.0 or wz != 0.0:
-                        recovery_keepalive_until = time.time() + adaptive_stop_hold_s
                     vx = vy = wz = 0.0
                     dirty = True
                 elif ch == "f":
@@ -162,7 +150,6 @@ def main():
                     fsm = "DAMP"
                     vx = vy = wz = 0.0
                     last_motion_key = 0.0
-                    recovery_keepalive_until = 0.0
                     write_cmd(fsm, 0.0, 0.0, 0.0, height,
                               args.min_height, args.max_height, estop=True)
                     print("\n[DAMP] e-stop request written")
@@ -171,13 +158,9 @@ def main():
             motion_active = time.time() - last_motion_key <= args.key_timeout
             if not motion_active and (vx != 0.0 or vy != 0.0 or wz != 0.0):
                 vx = vy = wz = 0.0
-                recovery_keepalive_until = time.time() + adaptive_stop_hold_s
                 dirty = True
 
-            recovery_keepalive = (
-                fsm == "RL_FULL" and time.time() < recovery_keepalive_until
-            )
-            if motion_active or dirty or recovery_keepalive:
+            if motion_active or dirty:
                 write_cmd(
                     fsm, vx, vy, wz, height, args.min_height, args.max_height,
                     allow_recovery=(fsm == "RL_FULL"),

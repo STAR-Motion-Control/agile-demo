@@ -6,7 +6,6 @@
 #
 # 用法:
 #   bash start_g1_onboard_nav_taptap.sh                       # 默认参数
-export GROOT_TAPTAP_ADAPTIVE=1
 controller=()
 if [[ $# -gt 0 && "$1" != --* ]]; then
     controller=("$1")

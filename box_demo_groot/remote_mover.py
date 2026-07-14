@@ -47,14 +47,39 @@ class RemoteMover(GrootMover):
         self._session.trust_env = False  # never route localhost/LAN via a proxy
 
     # ----------------------------------------------------------------- transport
-    def _get(self, path: str, **params) -> None:
+    def _get(self, path: str, **params):
         try:
             r = self._session.get(f"{self.ipc_url}{path}", params=params,
                                   timeout=self._timeout)
             if r.status_code != 200:
                 self._log(f"HTTP {path} -> {r.status_code}: {r.text[:120]}")
+                return None
+            return r.json()
         except Exception as exc:  # network hiccup must not crash the grasp loop
             self._log(f"HTTP {path} failed: {exc}")
+            return None
+
+    def _wait_for_server_motion(self, duration: float) -> None:
+        deadline = time.monotonic() + max(0.0, duration) + 4.0
+        while time.monotonic() < deadline:
+            status = self._get("/status")
+            if not isinstance(status, dict) or "motion_active" not in status:
+                time.sleep(max(0.0, duration))
+                return
+            if not status["motion_active"]:
+                return
+            time.sleep(0.05)
+        self._log("[WARN] HTTP motion/recovery wait timed out")
+
+    def _wait_for_recovery(self) -> None:
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            status = self._get("/status")
+            taptap = status.get("taptap", {}) if isinstance(status, dict) else {}
+            if not taptap.get("active", False):
+                return
+            time.sleep(0.05)
+        self._log("[WARN] taptap recovery wait timed out")
 
     # --------- override the low-level primitives: the server holds each phase
     def _hold(self, forward: float, lateral: float, yaw: float,
@@ -67,13 +92,14 @@ class RemoteMover(GrootMover):
             return
         self._get("/cmd", vx=forward, vy=lateral, wz=yaw, duration=duration,
                   height=self._height, fsm="RL_FULL")
-        time.sleep(duration)
+        self._wait_for_server_motion(duration)
 
     def _settle(self) -> None:
         deadline = time.monotonic() + self.stop_hold_s
         while time.monotonic() < deadline:
             self._get("/stop", height=self._height, allow_recovery=1)
             time.sleep(min(0.10, max(0.0, deadline - time.monotonic())))
+        self._wait_for_recovery()
 
     def _refresh_for(self, forward: float, lateral: float, yaw: float,
                      duration: float) -> None:  # back-compat

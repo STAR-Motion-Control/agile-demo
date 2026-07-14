@@ -10,6 +10,5 @@
 #   bash start_g1_onboard_taptap.sh --taptap-settle-s 1.5    # 参数原样透传 adapter
 # 可调: --taptap-settle-s 1.2  --taptap-cmd 0.08  --taptap-period-s 0.4
 #       --taptap-debounce-s 0.35  --taptap-min-motion-s 0.4
-export GROOT_TAPTAP_ADAPTIVE=1
 exec bash "$(cd "$(dirname "$0")" && pwd)/start_g1_onboard.sh" dwbc \
     --taptap --taptap-recovery adaptive "$@"

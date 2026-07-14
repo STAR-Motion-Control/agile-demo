@@ -1,8 +1,6 @@
 import os
 import importlib.util
-import json
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -14,7 +12,7 @@ motion_backend = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = motion_backend
 SPEC.loader.exec_module(motion_backend)
 GrootHttpDiscreteBackend = motion_backend.GrootHttpDiscreteBackend
-resolve_adaptive_recovery = motion_backend.resolve_adaptive_recovery
+resolve_stop_hold = motion_backend.resolve_stop_hold
 
 
 class FakeMover:
@@ -57,24 +55,10 @@ def make_backend(linear_rate, yaw_rate):
 
 
 class TaptapBackendTest(unittest.TestCase):
-    def test_recovery_is_enabled_only_by_wrapper_environment(self):
-        with mock.patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(resolve_adaptive_recovery())
+    def test_taptap_uses_standard_stop_hold(self):
+        self.assertEqual(resolve_stop_hold({"stop_hold_s": 0.4}), 0.4)
         with mock.patch.dict(os.environ, {"GROOT_TAPTAP_ADAPTIVE": "1"}, clear=True):
-            self.assertTrue(resolve_adaptive_recovery())
-
-    def test_taptap_marker_survives_a_separate_navigation_shell(self):
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as marker:
-            json.dump({"taptap_recovery": True}, marker)
-            marker.flush()
-            with mock.patch.dict(
-                os.environ,
-                {"GROOT_NAV_MOTION_PROFILE_FILE": marker.name},
-                clear=True,
-            ):
-                payload = motion_backend._read_profile_payload(marker.name)
-                resolved = resolve_adaptive_recovery(payload)
-        self.assertTrue(resolved)
+            self.assertEqual(resolve_stop_hold({"stop_hold_s": 0.4}), 0.4)
 
     def test_taptap_continuous_command_is_not_slew_limited(self):
         backend = make_backend(0.0, 0.0)

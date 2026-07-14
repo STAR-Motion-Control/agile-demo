@@ -73,19 +73,8 @@ def resolve_motion_profile(backend_cfg: Any) -> str:
     return profile
 
 
-def _env_enabled(name: str, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return bool(default)
-    return str(raw).strip().lower() in ("1", "true", "yes", "on")
-
-
-def resolve_adaptive_recovery(runtime_profile: dict[str, Any] | None = None) -> bool:
-    runtime_profile = runtime_profile or {}
-    return (
-        _env_enabled("GROOT_TAPTAP_ADAPTIVE", False)
-        or bool(runtime_profile.get("taptap_recovery", False))
-    )
+def resolve_stop_hold(backend_cfg: Any) -> float:
+    return float(config_get(backend_cfg, "stop_hold_s", 0.4))
 
 
 class GrootHttpDiscreteBackend:
@@ -111,7 +100,6 @@ class GrootHttpDiscreteBackend:
         def runtime_value(key: str, default: Any) -> Any:
             return runtime_profile.get(key, config_get(backend_cfg, key, default))
 
-        adaptive_recovery = resolve_adaptive_recovery(runtime_profile)
         self._continuous_velocity_enabled = bool(config_get(backend_cfg, "continuous_velocity_enable", True))
         self._continuous_command_interval = max(
             0.02,
@@ -176,12 +164,7 @@ class GrootHttpDiscreteBackend:
                 response.raise_for_status()
                 return response.json()
 
-        stop_hold_s = float(config_get(backend_cfg, "stop_hold_s", 0.4))
-        if adaptive_recovery:
-            stop_hold_s = max(
-                stop_hold_s,
-                float(config_get(backend_cfg, "taptap_stop_hold_s", 2.20)),
-            )
+        stop_hold_s = resolve_stop_hold(backend_cfg)
 
         mover_kwargs = {
             "fwd_cruise": float(config_get(backend_cfg, "fwd_cruise", 0.40)),
@@ -211,7 +194,7 @@ class GrootHttpDiscreteBackend:
             "Using GR00T HTTP discrete motion backend at %s (profile=%s, "
             "min_duration=%.2f, min_distance=%.2f, v_floor=%.2f, "
             "warmup=%.2fs@%.2fm/s, stand_height=%.2fm, runtime=%s, "
-            "adaptive_recovery=%s, slew=%.2f/%.2f)",
+            "slew=%.2f/%.2f)",
             ipc_url,
             motion_profile,
             min_duration,
@@ -221,7 +204,6 @@ class GrootHttpDiscreteBackend:
             warmup_speed,
             mover_kwargs["stand_height"],
             runtime_profile_file,
-            adaptive_recovery,
             self._continuous_linear_slew_rate,
             self._continuous_yaw_slew_rate,
         )

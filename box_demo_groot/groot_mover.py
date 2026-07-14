@@ -307,8 +307,7 @@ class GrootMover:
         self.auto_raise_for_walk = auto_raise_for_walk
         self.dist_gain = max(1.0, float(dist_gain))
         self.refresh_hz = refresh_hz
-        adaptive_wait = 2.20 if os.environ.get("GROOT_TAPTAP_ADAPTIVE") == "1" else 0.0
-        self.stop_hold_s = max(float(stop_hold_s), adaptive_wait)
+        self.stop_hold_s = float(stop_hold_s)
         self.verbose = verbose
 
     # ----------------------------------------------------------------- helpers
@@ -340,6 +339,24 @@ class GrootMover:
             write_command(self.cmd_file, "RL_FULL", 0.0, 0.0, 0.0,
                           height=self._height, allow_recovery=True)
             time.sleep(period)
+        self._wait_for_recovery()
+
+    def _wait_for_recovery(self) -> None:
+        status_file = Path(os.environ.get(
+            "GROOT_TAPTAP_STATUS_FILE", "/tmp/groot_taptap_status.json"
+        ))
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline:
+            try:
+                status = json.loads(status_file.read_text(encoding="utf-8"))
+                age = max(0.0, time.time() - float(status.get("timestamp", 0.0)))
+                active = age <= 1.0 and bool(status.get("active", False))
+            except (FileNotFoundError, ValueError, TypeError, json.JSONDecodeError):
+                active = False
+            if not active:
+                return
+            time.sleep(0.05)
+        self._log("[WARN] taptap recovery wait timed out")
 
     def _refresh_for(self, forward: float, lateral: float, yaw: float,
                      duration: float) -> None:

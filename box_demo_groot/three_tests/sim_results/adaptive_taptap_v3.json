@@ -1,0 +1,245 @@
+{
+  "results": [
+    {
+      "motion": "fwd",
+      "adaptive": false,
+      "events": [],
+      "triggered": false,
+      "initial_width": 0.24563821009412307,
+      "reference_width": 0.24,
+      "reference_stagger": 0.08,
+      "final_width": 0.24909809071777317,
+      "final_stagger": -0.030427880625424564,
+      "stagger_error": 0.11042788062542457,
+      "width_error": 0.009098090717773177,
+      "foot_yaw_error": 0.08380183173258438,
+      "min_width": 0.23198549346068603,
+      "recovery_drift": 0.0,
+      "fell": false,
+      "end_x": 0.3616723039798328,
+      "end_y": -0.17167180536183987,
+      "end_yaw": -0.313892540871168,
+      "move_window": [
+        2.0,
+        5.633333333333333
+      ]
+    },
+    {
+      "motion": "fwd",
+      "adaptive": true,
+      "events": [
+        "checking",
+        "started",
+        "completed"
+      ],
+      "triggered": true,
+      "initial_width": 0.24563821009412307,
+      "reference_width": 0.24,
+      "reference_stagger": 0.08,
+      "final_width": 0.2597390844080337,
+      "final_stagger": 0.011767650928890927,
+      "stagger_error": 0.06823234907110907,
+      "width_error": 0.019739084408033736,
+      "foot_yaw_error": 0.06802751649373429,
+      "min_width": 0.23198549346068603,
+      "recovery_drift": 0.04931599657314161,
+      "fell": false,
+      "end_x": 0.33410691356415395,
+      "end_y": -0.17248454484898038,
+      "end_yaw": -0.3701665318709514,
+      "move_window": [
+        2.0,
+        5.633333333333333
+      ]
+    },
+    {
+      "motion": "back",
+      "adaptive": false,
+      "events": [],
+      "triggered": false,
+      "initial_width": 0.24563821009412307,
+      "reference_width": 0.24,
+      "reference_stagger": 0.08,
+      "final_width": 0.26248125000464056,
+      "final_stagger": 0.030441031827762824,
+      "stagger_error": 0.04955896817223718,
+      "width_error": 0.022481250004640574,
+      "foot_yaw_error": 0.08023544381469216,
+      "min_width": 0.23486331782579634,
+      "recovery_drift": 0.0,
+      "fell": false,
+      "end_x": -1.0518803866438955,
+      "end_y": 0.2082813976014032,
+      "end_yaw": -0.34912310486250075,
+      "move_window": [
+        2.0,
+        6.3
+      ]
+    },
+    {
+      "motion": "back",
+      "adaptive": true,
+      "events": [
+        "checking",
+        "healthy"
+      ],
+      "triggered": false,
+      "initial_width": 0.24563821009412307,
+      "reference_width": 0.24,
+      "reference_stagger": 0.08,
+      "final_width": 0.26248125000464056,
+      "final_stagger": 0.030441031827762824,
+      "stagger_error": 0.04955896817223718,
+      "width_error": 0.022481250004640574,
+      "foot_yaw_error": 0.08023544381469216,
+      "min_width": 0.23486331782579634,
+      "recovery_drift": 0.0,
+      "fell": false,
+      "end_x": -1.0518803866438955,
+      "end_y": 0.2082813976014032,
+      "end_yaw": -0.34912310486250075,
+      "move_window": [
+        2.0,
+        6.3
+      ]
+    },
+    {
+      "motion": "lat",
+      "adaptive": false,
+      "events": [],
+      "triggered": false,
+      "initial_width": 0.24563821009412307,
+      "reference_width": 0.24,
+      "reference_stagger": 0.08,
+      "final_width": 0.22995502117397038,
+      "final_stagger": 0.009033543474005298,
+      "stagger_error": 0.0709664565259947,
+      "width_error": 0.010044978826029616,
+      "foot_yaw_error": 0.08101267558557401,
+      "min_width": 0.2085810386945522,
+      "recovery_drift": 0.0,
+      "fell": false,
+      "end_x": -0.25031202649133577,
+      "end_y": 0.30094060576966486,
+      "end_yaw": -0.2278618167739453,
+      "move_window": [
+        2.0,
+        4.3
+      ]
+    },
+    {
+      "motion": "lat",
+      "adaptive": true,
+      "events": [
+        "checking",
+        "healthy"
+      ],
+      "triggered": false,
+      "initial_width": 0.24563821009412307,
+      "reference_width": 0.24,
+      "reference_stagger": 0.08,
+      "final_width": 0.22995502117397038,
+      "final_stagger": 0.009033543474005298,
+      "stagger_error": 0.0709664565259947,
+      "width_error": 0.010044978826029616,
+      "foot_yaw_error": 0.08101267558557401,
+      "min_width": 0.2085810386945522,
+      "recovery_drift": 0.0,
+      "fell": false,
+      "end_x": -0.25031202649133577,
+      "end_y": 0.30094060576966486,
+      "end_yaw": -0.2278618167739453,
+      "move_window": [
+        2.0,
+        4.3
+      ]
+    },
+    {
+      "motion": "turn",
+      "adaptive": false,
+      "events": [],
+      "triggered": false,
+      "initial_width": 0.24563821009412307,
+      "reference_width": 0.24,
+      "reference_stagger": 0.08,
+      "final_width": 0.2537777075313079,
+      "final_stagger": -0.003005952354581648,
+      "stagger_error": 0.08300595235458165,
+      "width_error": 0.013777707531307914,
+      "foot_yaw_error": 0.08092055689831934,
+      "min_width": 0.23780846503078806,
+      "recovery_drift": 0.0,
+      "fell": false,
+      "end_x": -0.31801890846780084,
+      "end_y": 0.01307152471851965,
+      "end_yaw": 1.029962700241614,
+      "move_window": [
+        2.0,
+        5.926990816987241
+      ]
+    },
+    {
+      "motion": "turn",
+      "adaptive": true,
+      "events": [
+        "checking",
+        "started",
+        "completed"
+      ],
+      "triggered": true,
+      "initial_width": 0.24563821009412307,
+      "reference_width": 0.24,
+      "reference_stagger": 0.08,
+      "final_width": 0.2579758178327482,
+      "final_stagger": 0.017295339567564877,
+      "stagger_error": 0.06270466043243512,
+      "width_error": 0.01797581783274821,
+      "foot_yaw_error": 0.06621959920230491,
+      "min_width": 0.23780846503078806,
+      "recovery_drift": 0.01904444185065633,
+      "fell": false,
+      "end_x": -0.30964044774293126,
+      "end_y": 0.0010245270921748764,
+      "end_yaw": 0.9761163775242734,
+      "move_window": [
+        2.0,
+        5.926990816987241
+      ]
+    }
+  ],
+  "bad_initial": {
+    "initial": {
+      "width": 0.16985332054497332,
+      "stagger": 0.17075624592631303,
+      "height_delta": 0.02262736474509537,
+      "yaw_error": -0.05303995547699758
+    },
+    "final": {
+      "width": 0.23761011147581015,
+      "stagger": 0.05800994193455333,
+      "height_delta": 3.803350232835928e-05,
+      "yaw_error": 0.08264487017619437
+    },
+    "events": [
+      "checking_initial",
+      "started",
+      "completed",
+      "checking",
+      "healthy"
+    ],
+    "fell": false
+  },
+  "assertions": {
+    "no_fall": true,
+    "healthy_stops_not_triggered": true,
+    "healthy_path_pose_equivalent": true,
+    "abnormal_stops_triggered": true,
+    "abnormal_stagger_improved": true,
+    "recovery_drift_bounded": true,
+    "safe_width": true,
+    "bad_initial_detected": true,
+    "bad_initial_no_fall": true,
+    "bad_initial_recovered_inside_limits": true
+  },
+  "passed": true
+}
