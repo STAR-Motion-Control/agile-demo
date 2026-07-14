@@ -1,0 +1,62 @@
+G001 nav_uat source repository:
+  https://github.com/SpatialtemporalAI/Woosh_robot.git
+  branch: g1_sustech_demo
+  base commit: 2e239ba40594252f57fefad14c028ed8b6af446e
+
+This patch records the navigation-controller limit alignment deployed on G001.
+It intentionally does not enable closed-loop velocity control.
+
+diff --git a/src/Node/action_executor.py b/src/Node/action_executor.py
+--- a/src/Node/action_executor.py
++++ b/src/Node/action_executor.py
+@@ -94,13 +94,13 @@ class ActionExecutorClient(Node):
+             "final_angle_tolerance": 0.2,
+             "final_pose_timeout": 4.0,
+             "final_pose_max_forward_speed": 0.18,
+-            "final_pose_max_lateral_command": 0.70,
++            "final_pose_max_lateral_command": 0.30,
+             "final_pose_max_angular_speed": 0.35,
+             "final_pose_min_linear_command": 0.03,
+             "final_pose_min_angular_command": 0.04,
+-            "max_forward_speed": 0.35,
+-            "max_lateral_command": 0.95,
+-            "max_angular_speed": 0.8,
++            "max_forward_speed": 0.50,
++            "max_lateral_command": 0.30,
++            "max_angular_speed": 0.60,
+             "min_linear_command": 0.08,
+             "min_angular_command": 0.12,
+             "forward_command_scale": 2.6,
+@@ -118,7 +118,7 @@ class ActionExecutorClient(Node):
+             "linear_stop_stable_time": 0.25,
+             "linear_velocity_filter_alpha": 0.35,
+             "waypoint_turn_in_place_threshold": 0.5,
+-            "waypoint_max_forward_speed": 0.35,
++            "waypoint_max_forward_speed": 0.50,
+             "waypoint_min_forward_command": 0.08,
+             "waypoint_timeout_per_meter": 4.0,
+             "forward_timeout_per_meter": 8.0,
+
+diff --git a/src/config_bk.yaml b/src/config_bk.yaml
+--- a/src/config_bk.yaml
++++ b/src/config_bk.yaml
+@@ -93,13 +93,15 @@ motion_control:
+     final_angle_tolerance: 0.2
+     final_pose_timeout: 4.0
+     final_pose_max_forward_speed: 0.18
+-    final_pose_max_lateral_command: 0.70
++    # Keep every navigation command within the GR00T adapter hard limits.
++    final_pose_max_lateral_command: 0.30
+     final_pose_max_angular_speed: 0.35
+     final_pose_min_linear_command: 0.03
+     final_pose_min_angular_command: 0.04
+-    max_forward_speed: 1.0
+-    max_lateral_command: 0.95
+-    max_angular_speed: 1.0
++    max_forward_speed: 0.50
++    max_lateral_command: 0.30
++    max_angular_speed: 0.60
++    waypoint_max_forward_speed: 0.50
+     min_linear_command: 0.08
+     min_angular_command: 0.12
+     forward_command_scale: 1.0
