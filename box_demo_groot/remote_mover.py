@@ -91,15 +91,25 @@ class RemoteMover(GrootMover):
         if duration <= 0:
             return
         self._get("/cmd", vx=forward, vy=lateral, wz=yaw, duration=duration,
-                  height=self._height, fsm="RL_FULL")
+                  height=self._height, fsm="RL_FULL",
+                  allow_recovery=int(self.recover_each_move),
+                  defer_recovery=int(not self.recover_each_move))
         self._wait_for_server_motion(duration)
 
-    def _settle(self) -> None:
+    def _settle(self, allow_recovery: bool | None = None) -> None:
+        if allow_recovery is None:
+            allow_recovery = self.recover_each_move
         deadline = time.monotonic() + self.stop_hold_s
         while time.monotonic() < deadline:
-            self._get("/stop", height=self._height, allow_recovery=1)
+            self._get(
+                "/stop",
+                height=self._height,
+                allow_recovery=int(allow_recovery),
+                defer_recovery=int(not allow_recovery),
+            )
             time.sleep(min(0.10, max(0.0, deadline - time.monotonic())))
-        self._wait_for_recovery()
+        if allow_recovery:
+            self._wait_for_recovery()
 
     def _refresh_for(self, forward: float, lateral: float, yaw: float,
                      duration: float) -> None:  # back-compat

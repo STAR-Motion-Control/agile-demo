@@ -85,6 +85,23 @@ def test_stale_recovery_status_is_never_active():
     assert status["active"] is False
 
 
+def test_deferred_motion_timeout_preserves_segment_without_recovery():
+    path = Path(tempfile.mkdtemp()) / "cmd.json"
+    setup_server(path)
+    server.start_motion(
+        0.4, 0.0, 0.0, 0.06, 0.76, "RL_FULL", 0.02,
+        allow_recovery=False,
+        defer_recovery=True,
+    )
+    time.sleep(0.15)
+    payload = read(path)
+    assert payload["velocity"]["forward"] == 0.0
+    assert payload["allow_recovery"] is False
+    assert payload["defer_recovery"] is True
+    cmd = read_external_command(path, 0.76, 0.4, 0.5, 0.3, 0.6, 0.4, 0.8)
+    assert cmd.fresh and cmd.defer_recovery and not cmd.allow_recovery
+
+
 if __name__ == "__main__":
     tests = [value for name, value in sorted(globals().items()) if name.startswith("test_")]
     for test in tests:

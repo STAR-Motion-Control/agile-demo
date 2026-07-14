@@ -229,6 +229,25 @@
     ],
     "fell": false
   },
+  "navigation_batch": {
+    "boundary_s": 3.8,
+    "events": [
+      {
+        "time": 3.8000000000000003,
+        "event": "checking"
+      },
+      {
+        "time": 4.16,
+        "event": "started"
+      },
+      {
+        "time": 5.78,
+        "event": "completed"
+      }
+    ],
+    "active_before_boundary": false,
+    "fell": false
+  },
   "assertions": {
     "no_fall": true,
     "healthy_stops_not_triggered": true,
@@ -239,7 +258,10 @@
     "safe_width": true,
     "bad_initial_detected": true,
     "bad_initial_no_fall": true,
-    "bad_initial_recovered_inside_limits": true
+    "bad_initial_recovered_inside_limits": true,
+    "nav_batch_no_recovery_before_finish": true,
+    "nav_batch_finish_checked": true,
+    "nav_batch_no_fall": true
   },
   "passed": true
 }

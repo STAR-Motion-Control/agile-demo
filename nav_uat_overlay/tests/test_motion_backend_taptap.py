@@ -24,6 +24,7 @@ class FakeMover:
     def __init__(self):
         self.calls = []
         self.stops = 0
+        self.finishes = 0
 
     def _get(self, path, **params):
         self.calls.append((path, params))
@@ -31,6 +32,9 @@ class FakeMover:
 
     def stop(self):
         self.stops += 1
+
+    def finish_segment(self):
+        self.finishes += 1
 
 
 def make_backend(linear_rate, yaw_rate):
@@ -66,6 +70,8 @@ class TaptapBackendTest(unittest.TestCase):
             self.assertTrue(backend.publish_velocity(0.40, 0.20, 0.40)[0])
         first = backend._mover.calls[0][1]
         self.assertEqual((first["vx"], first["vy"], first["wz"]), (0.40, 0.20, 0.40))
+        self.assertEqual(first["allow_recovery"], 0)
+        self.assertEqual(first["defer_recovery"], 1)
 
     def test_standard_path_applies_target_immediately(self):
         backend = make_backend(0.0, 0.0)
@@ -82,6 +88,12 @@ class TaptapBackendTest(unittest.TestCase):
         self.assertEqual(backend._mover.stops, 1)
         self.assertEqual(backend._continuous_applied_command, (0.0, 0.0, 0.0))
         self.assertIsNone(backend._continuous_applied_time)
+
+    def test_finish_segment_is_the_only_normal_recovery_boundary(self):
+        backend = make_backend(0.0, 0.0)
+        self.assertTrue(backend.finish_segment()[0])
+        self.assertEqual(backend._mover.finishes, 1)
+        self.assertEqual(backend._mover.stops, 0)
 
 
 if __name__ == "__main__":

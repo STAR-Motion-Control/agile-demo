@@ -19,6 +19,7 @@
 
 两种入口的速度、高度、profile 和 mover 停止保持参数一致；taptap 入口只额外启用基于双足几何的
 自适应回正。禁止通过旧的 `GROOT_TAPTAP_ADAPTIVE` 环境变量或固定 `2.2 s` 等待判断当前模式。
+导航回正边界是完整 `/planned_action` 批次，不是批次内单个 `rotate/forward` 原语。
 
 ## 安全边界
 

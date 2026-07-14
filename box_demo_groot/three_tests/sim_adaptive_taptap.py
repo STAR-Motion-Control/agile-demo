@@ -30,6 +30,7 @@ class Cmd:
     fresh: bool = True
     estop: bool = False
     allow_recovery: bool = True
+    defer_recovery: bool = False
 
 
 def stance(state) -> StanceMetrics:
@@ -200,6 +201,62 @@ def run_bad_initial_case() -> dict:
     }
 
 
+def run_navigation_batch_case() -> dict:
+    backend = DwbcBackend()
+    backend.reset(settle_s=2.5, height=0.74)
+    controller = AdaptiveTapTapController(
+        reference_width=0.24,
+        reference_stagger=0.08,
+        width_margin=0.035,
+        stagger_limit=0.08,
+        yaw_limit=0.12,
+        debounce_s=0.35,
+        confirm_s=0.12,
+        min_motion_s=0.40,
+        recovery_s=1.60,
+        recovery_speed=0.08,
+        phase_s=0.40,
+    )
+    boundary_s = 3.80
+    events = []
+    active_before_boundary = False
+    states = []
+    for tick in range(int(6.2 / backend.ctrl_dt)):
+        now = tick * backend.ctrl_dt
+        if now < 1.0:
+            requested = Cmd(vx=0.30, allow_recovery=False, defer_recovery=True)
+        elif now < 1.4:
+            requested = Cmd(allow_recovery=False, defer_recovery=True)
+        elif now < 2.4:
+            requested = Cmd(wz=0.40, allow_recovery=False, defer_recovery=True)
+        elif now < 2.8:
+            requested = Cmd(allow_recovery=False, defer_recovery=True)
+        elif now < boundary_s:
+            requested = Cmd(vx=0.30, allow_recovery=False, defer_recovery=True)
+        else:
+            requested = Cmd(allow_recovery=True, defer_recovery=False)
+        effective, active, event = controller.update(
+            now, requested, stance(backend.state())
+        )
+        if event:
+            events.append({"time": now, "event": event})
+        if now < boundary_s and active:
+            active_before_boundary = True
+        backend.step({
+            "vx": effective.vx,
+            "vy": effective.vy,
+            "wz": effective.wz,
+            "height": effective.height,
+        })
+        states.append(backend.state())
+    return {
+        "boundary_s": boundary_s,
+        "events": events,
+        "active_before_boundary": active_before_boundary,
+        "fell": min(float(value["pelvis_z"]) for value in states) < 0.45,
+    }
+
+
 def main():
     results = []
     for motion in ("fwd", "back", "lat", "turn"):
@@ -256,6 +313,7 @@ def main():
         "safe_width": min(item["min_width"] for item in results) > 0.18,
     }
     bad_initial = run_bad_initial_case()
+    navigation_batch = run_navigation_batch_case()
     assertions["bad_initial_detected"] = (
         "checking_initial" in bad_initial["events"]
         and "started" in bad_initial["events"]
@@ -266,9 +324,22 @@ def main():
         or abs(bad_initial["final"]["stagger"] - 0.08) > 0.08
         or abs(bad_initial["final"]["yaw_error"]) > 0.12
     )
+    assertions["nav_batch_no_recovery_before_finish"] = (
+        not navigation_batch["active_before_boundary"]
+        and all(
+            item["time"] >= navigation_batch["boundary_s"]
+            for item in navigation_batch["events"]
+            if item["event"] in ("checking", "started")
+        )
+    )
+    assertions["nav_batch_finish_checked"] = any(
+        item["event"] == "checking" for item in navigation_batch["events"]
+    )
+    assertions["nav_batch_no_fall"] = not navigation_batch["fell"]
     payload = {
         "results": results,
         "bad_initial": bad_initial,
+        "navigation_batch": navigation_batch,
         "assertions": assertions,
         "passed": all(assertions.values()),
     }

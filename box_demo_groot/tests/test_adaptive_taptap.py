@@ -20,6 +20,7 @@ class Cmd:
     fresh: bool = True
     estop: bool = False
     allow_recovery: bool = False
+    defer_recovery: bool = False
 
 
 GOOD = StanceMetrics(width=0.24, stagger=0.03, height_delta=0.0)
@@ -158,6 +159,29 @@ def test_new_normal_command_is_held_until_recovery_finishes():
     assert active and out.vy == 0.0
     out, active, event = c.update(1.32, pending, GOOD)
     assert not active and event == "completed" and out.vy == 0.2
+
+
+def test_navigation_primitives_defer_recovery_until_segment_finish():
+    c = controller()
+    first = Cmd(vx=0.4, allow_recovery=False, defer_recovery=True)
+    c.update(0.0, first, GOOD)
+    c.update(0.25, first, GOOD)
+    out, active, event = c.update(
+        0.30, Cmd(defer_recovery=True), BAD
+    )
+    assert not active and event is None and out.vx == 0.0
+    out, active, event = c.update(
+        0.80, Cmd(fresh=False, defer_recovery=True), BAD
+    )
+    assert not active and event is None and c.state == c.IDLE
+
+    second = Cmd(wz=0.4, allow_recovery=False, defer_recovery=True)
+    c.update(0.90, second, BAD)
+    c.update(1.20, second, BAD)
+    out, active, event = c.update(1.30, Cmd(allow_recovery=True), BAD)
+    assert not active and event == "checking" and out.wz == 0.0
+    _, active, event = c.update(1.41, Cmd(allow_recovery=True), BAD)
+    assert active and event == "started"
 
 
 if __name__ == "__main__":

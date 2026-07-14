@@ -66,6 +66,7 @@ class ExternalCommand:
     fresh: bool
     estop: bool = False
     allow_recovery: bool = False
+    defer_recovery: bool = False
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
@@ -187,7 +188,11 @@ def read_external_command(
         return ExternalCommand("DAMP", 0.0, 0.0, 0.0, height, fresh, estop=True)
 
     if not fresh or fsm == "RL_LOWER":
-        return ExternalCommand(fsm, 0.0, 0.0, 0.0, height, fresh)
+        return ExternalCommand(
+            fsm, 0.0, 0.0, 0.0, height, fresh,
+            allow_recovery=bool(raw.get("allow_recovery", False)),
+            defer_recovery=bool(raw.get("defer_recovery", False)),
+        )
 
     vel = raw.get("velocity") or {}
     vx = float(vel.get("forward", 0.0))
@@ -219,6 +224,7 @@ def read_external_command(
         height=height,
         fresh=fresh,
         allow_recovery=bool(raw.get("allow_recovery", False)),
+        defer_recovery=bool(raw.get("defer_recovery", False)),
     )
 
 

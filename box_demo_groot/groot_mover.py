@@ -230,7 +230,8 @@ def write_command(cmd_file: str, fsm: str | None, forward: float = 0.0,
                   lateral: float = 0.0, yaw: float = 0.0,
                   height: float | None = None, duration: float | None = None,
                   estop: bool = False, limp: bool = False,
-                  allow_recovery: bool = False) -> None:
+                  allow_recovery: bool = False,
+                  defer_recovery: bool = False) -> None:
     """Atomically write the GR00T IPC command with units='agile' (physical)."""
     cmd: dict = {
         "fsm": fsm,
@@ -240,6 +241,7 @@ def write_command(cmd_file: str, fsm: str | None, forward: float = 0.0,
         "timestamp": time.time(),
         "source": "groot_mover",
         "allow_recovery": bool(allow_recovery),
+        "defer_recovery": bool(defer_recovery),
     }
     if height is not None:
         cmd["height"] = float(_clamp(height, MIN_HEIGHT, MAX_HEIGHT))
@@ -279,6 +281,7 @@ class GrootMover:
                  settle_before_s: float = SETTLE_BEFORE_S,
                  walk_min_height: float = WALK_MIN_HEIGHT,
                  auto_raise_for_walk: bool = False, dist_gain: float = DIST_GAIN,
+                 recover_each_move: bool = True,
                  verbose: bool = True):
         self.cmd_file = cmd_file
         self._height = stand_height
@@ -308,6 +311,7 @@ class GrootMover:
         self.dist_gain = max(1.0, float(dist_gain))
         self.refresh_hz = refresh_hz
         self.stop_hold_s = float(stop_hold_s)
+        self.recover_each_move = bool(recover_each_move)
         self.verbose = verbose
 
     # ----------------------------------------------------------------- helpers
@@ -328,18 +332,28 @@ class GrootMover:
             remaining = max(0.0, deadline - time.time())
             write_command(self.cmd_file, "RL_FULL", forward, lateral, yaw,
                           height=self._height, duration=remaining,
-                          allow_recovery=True)
+                          allow_recovery=self.recover_each_move,
+                          defer_recovery=not self.recover_each_move)
             time.sleep(period)
 
-    def _settle(self) -> None:
+    def _settle(self, allow_recovery: bool | None = None) -> None:
         """Write zero velocity (Balance) for stop_hold_s so the base comes to rest."""
+        if allow_recovery is None:
+            allow_recovery = self.recover_each_move
         period = 1.0 / self.refresh_hz
         end = time.time() + self.stop_hold_s
         while time.time() < end:
             write_command(self.cmd_file, "RL_FULL", 0.0, 0.0, 0.0,
-                          height=self._height, allow_recovery=True)
+                          height=self._height,
+                          allow_recovery=allow_recovery,
+                          defer_recovery=not allow_recovery)
             time.sleep(period)
-        self._wait_for_recovery()
+        if allow_recovery:
+            self._wait_for_recovery()
+
+    def finish_segment(self) -> None:
+        """Mark a complete navigation/manipulation segment and recover if needed."""
+        self._settle(allow_recovery=True)
 
     def _wait_for_recovery(self) -> None:
         status_file = Path(os.environ.get(

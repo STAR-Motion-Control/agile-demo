@@ -25,6 +25,8 @@
 普通和 taptap 入口的速度、高度、profile、warm-up 与 `0.4 s` mover 停止保持完全一致。
 taptap 只在初始站姿或动作停止后的双足几何超限时回正；状态通过
 `/tmp/groot_taptap_status.json` 和 HTTP `/status` 传递，导航距离计时在回正期间暂停。
+单个 `rotate/forward` 或短 HTTP hold 结束只 defer，完整 `/planned_action` 批次成功结束才调用
+`finish_segment` 检查回正。
 
 真机测试必须有人在环。键盘和 ROS 导航命令必须人工互斥，先完成主指引中的 stop、`10 deg`、
 `0.10 m` 分级测试，再接 `/planned_action` 或 `/nav/text_nav`。

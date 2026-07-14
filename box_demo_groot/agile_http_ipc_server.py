@@ -88,6 +88,7 @@ def write_cmd(
     *,
     estop: bool = False,
     allow_recovery: bool = False,
+    defer_recovery: bool = False,
 ) -> dict:
     t = time.time()
     fsm_out = "DAMP" if estop else fsm
@@ -100,6 +101,7 @@ def write_cmd(
             "timestamp": t,
             "source": "http_ipc",
             "allow_recovery": bool(allow_recovery),
+            "defer_recovery": bool(defer_recovery),
         }
         if estop:
             payload["estop"] = True
@@ -115,6 +117,7 @@ def write_cmd(
         "timestamp": t,
         "source": "http_ipc",
         "allow_recovery": bool(allow_recovery),
+        "defer_recovery": bool(defer_recovery),
     }
     if estop:
         payload["estop"] = True
@@ -175,6 +178,8 @@ def start_motion(
     height: float,
     fsm: str,
     refresh_s: float,
+    allow_recovery: bool = True,
+    defer_recovery: bool = False,
 ) -> dict:
     global _motion_stop
     duration = max(0.0, float(duration))
@@ -194,10 +199,18 @@ def start_motion(
                 last_tick = now
                 if not read_taptap_status().get("active", False):
                     remaining -= elapsed
-                write_cmd(fsm, vx, vy, wz, height, allow_recovery=True)
+                write_cmd(
+                    fsm, vx, vy, wz, height,
+                    allow_recovery=allow_recovery,
+                    defer_recovery=defer_recovery,
+                )
                 time.sleep(refresh_s)
             if not stop_event.is_set():
-                write_cmd(fsm, 0.0, 0.0, 0.0, height, allow_recovery=True)
+                write_cmd(
+                    fsm, 0.0, 0.0, 0.0, height,
+                    allow_recovery=allow_recovery,
+                    defer_recovery=defer_recovery,
+                )
         finally:
             global _motion_stop
             with _motion_lock:
@@ -213,6 +226,8 @@ def start_motion(
         "height": height,
         "duration": duration,
         "refresh_s": refresh_s,
+        "allow_recovery": bool(allow_recovery),
+        "defer_recovery": bool(defer_recovery),
     }
 
 
@@ -248,6 +263,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(write_cmd(
                     fsm, 0.0, 0.0, 0.0, height,
                     allow_recovery=get_bool(qs, "allow_recovery", False),
+                    defer_recovery=get_bool(qs, "defer_recovery", False),
                 ))
             elif path == "/damp":
                 cancel_motion()
@@ -265,12 +281,17 @@ class Handler(BaseHTTPRequestHandler):
                 wz = get_float(qs, "wz", 0.0)
                 duration = get_float(qs, "duration", 0.0)
                 if duration > 0:
-                    self._json(start_motion(vx, vy, wz, duration, height, fsm, refresh_s))
+                    self._json(start_motion(
+                        vx, vy, wz, duration, height, fsm, refresh_s,
+                        allow_recovery=get_bool(qs, "allow_recovery", True),
+                        defer_recovery=get_bool(qs, "defer_recovery", False),
+                    ))
                 else:
                     cancel_motion()
                     self._json(write_cmd(
                         fsm, vx, vy, wz, height,
                         allow_recovery=get_bool(qs, "allow_recovery", True),
+                        defer_recovery=get_bool(qs, "defer_recovery", False),
                     ))
             elif path == "/forward":
                 distance = get_float(qs, "distance", 0.08)

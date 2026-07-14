@@ -187,6 +187,7 @@ class GrootHttpDiscreteBackend:
             "walk_min_height": float(runtime_value("walk_min_height", 0.72)),
             "auto_raise_for_walk": bool(config_get(backend_cfg, "auto_raise_for_walk", False)),
             "dist_gain": float(config_get(backend_cfg, "dist_gain", 1.0)),
+            "recover_each_move": False,
             "verbose": bool(config_get(backend_cfg, "verbose", True)),
         }
         self._mover = StrictRemoteMover(ipc_url, timeout=timeout, **mover_kwargs)
@@ -292,6 +293,8 @@ class GrootHttpDiscreteBackend:
                 "wz": command[2],
                 "duration": self._continuous_hold_duration,
                 "fsm": self._continuous_fsm,
+                "allow_recovery": 0,
+                "defer_recovery": 1,
             }
             height = getattr(self._mover, "_height", None)
             if height is not None:
@@ -357,6 +360,18 @@ class GrootHttpDiscreteBackend:
         except Exception as exc:
             self.log.warning("GR00T stop failed: %s", exc)
             return self._result(False, f"GR00T stop failed: {exc}", -1)
+
+    def finish_segment(self):
+        if not self.enabled:
+            return self._result(False, "GR00T backend is disabled.", -1)
+        try:
+            self._reset_continuous_state()
+            if self._mover is not None:
+                self._mover.finish_segment()
+            return self._result(True, "success.", 1)
+        except Exception as exc:
+            self.log.warning("GR00T segment finish failed: %s", exc)
+            return self._result(False, f"GR00T segment finish failed: {exc}", -1)
 
     def shutdown(self):
         return self.stop()

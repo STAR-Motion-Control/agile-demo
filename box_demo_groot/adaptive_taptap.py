@@ -127,10 +127,12 @@ class AdaptiveTapTapController:
 
         if self.state == self.IDLE:
             if not cmd.fresh:
-                self._motion_since = None
+                if not cmd.defer_recovery:
+                    self._motion_since = None
                 return cmd, False, None
             if moving:
-                if (cmd.allow_recovery and not self._startup_checked and stance is not None
+                if ((cmd.allow_recovery or cmd.defer_recovery)
+                        and not self._startup_checked and stance is not None
                         and stance.height_delta <= self.max_height_delta):
                     self._startup_checked = True
                     if self.stance_bad(stance):
@@ -146,6 +148,8 @@ class AdaptiveTapTapController:
                 return cmd, False, None
             if self._motion_since is None:
                 return cmd, False, None
+            if cmd.defer_recovery:
+                return cmd, False, None
             motion_duration = now - self._motion_since
             self._motion_since = None
             if not cmd.allow_recovery or motion_duration < self.min_motion_s:
@@ -158,7 +162,7 @@ class AdaptiveTapTapController:
         # A fresh explicit stop is a safety override. Stale input is allowed
         # only after a fresh allow_recovery transition has armed this bounded
         # internal sequence; this keeps standard and taptap mover timing equal.
-        if cmd.fresh and not cmd.allow_recovery:
+        if cmd.fresh and not cmd.allow_recovery and not cmd.defer_recovery:
             self._finish()
             self._motion_since = None
             return cmd, False, "cancelled"

@@ -94,22 +94,33 @@ class ActionExecutorClient(Node):
             "final_angle_tolerance": 0.2,
             "final_pose_timeout": 4.0,
             "final_pose_max_forward_speed": 0.18,
-            "final_pose_max_lateral_speed": 0.12,
+            "final_pose_max_lateral_command": 0.30,
             "final_pose_max_angular_speed": 0.35,
             "final_pose_min_linear_command": 0.03,
             "final_pose_min_angular_command": 0.04,
-            "final_pose_kp_linear": 1.2,
-            "final_pose_kp_lateral": 1.0,
-            "final_pose_kp_angular": 0.8,
-            "max_forward_speed": 0.35,
-            "max_lateral_speed": 0.12,
-            "max_angular_speed": 0.8,
+            "max_forward_speed": 0.50,
+            "max_lateral_command": 0.30,
+            "max_angular_speed": 0.60,
             "min_linear_command": 0.08,
             "min_angular_command": 0.12,
-            "kp_linear": 1.0,
-            "kp_lateral": 0.8,
-            "kp_angular": 1.4,
-            "angular_command_scale": 1.0,
+            "forward_command_scale": 2.6,
+            "backward_command_scale": 1.9,
+            "left_command_scale": 6.0,
+            "right_command_scale": 7.5,
+            "positive_angular_command_scale": 1.23,
+            "negative_angular_command_scale": 1.06,
+            "angular_stop_prediction_time": 0.8,
+            "angular_stop_velocity_tolerance": 0.03,
+            "angular_stop_stable_time": 0.25,
+            "angular_velocity_filter_alpha": 0.35,
+            "linear_stop_prediction_time": 1.05,
+            "linear_stop_velocity_tolerance": 0.03,
+            "linear_stop_stable_time": 0.25,
+            "linear_velocity_filter_alpha": 0.35,
+            "waypoint_turn_in_place_threshold": 0.5,
+            "waypoint_max_forward_speed": 0.50,
+            "waypoint_min_forward_command": 0.08,
+            "waypoint_timeout_per_meter": 4.0,
             "forward_timeout_per_meter": 8.0,
             "rotate_timeout_per_rad": 3.0,
             "min_timeout": 1.0,
@@ -118,6 +129,13 @@ class ActionExecutorClient(Node):
             "final_settle_time": 0.25,
             "final_validation_samples": 3,
             "final_validation_interval": 0.05,
+            "final_discrete_alignment_enable": True,
+            "final_discrete_alignment_passes": 2,
+            "final_discrete_alignment_position_tolerance": None,
+            "final_discrete_alignment_angle_tolerance": None,
+            "final_discrete_alignment_min_translation": 0.02,
+            "final_discrete_alignment_min_angle": 0.03,
+            "final_discrete_alignment_settle_time": 0.2,
             "final_pose_jump_filter_enable": True,
             "final_pose_max_position_jump": 0.15,
             "final_pose_max_angle_jump": 0.35,
@@ -143,6 +161,8 @@ class ActionExecutorClient(Node):
                 defaults[key] = bool(value)
             elif isinstance(default_value, str):
                 defaults[key] = str(value)
+            elif default_value is None:
+                defaults[key] = None if value is None else float(value)
             else:
                 defaults[key] = float(value)
         return defaults
@@ -154,6 +174,34 @@ class ActionExecutorClient(Node):
     @staticmethod
     def _clamp(value, low, high):
         return max(low, min(high, value))
+
+    def _motion_backend_enabled(self):
+        return bool(getattr(getattr(self, "motion_backend", None), "enabled", False))
+
+    def _motion_backend_supports_continuous_velocity(self):
+        backend = getattr(self, "motion_backend", None)
+        if backend is None or not bool(getattr(backend, "enabled", False)):
+            return False
+        supports = getattr(backend, "supports_continuous_velocity", None)
+        if not callable(supports):
+            return False
+        try:
+            return bool(supports())
+        except Exception as exc:
+            logger.warning("Failed to check motion backend continuous velocity support: %s", exc)
+            return False
+
+    @staticmethod
+    def _scaled_directional_error(value, positive_scale, negative_scale):
+        scale = positive_scale if value >= 0.0 else negative_scale
+        return value * scale
+
+    def _scaled_angular_error(self, error):
+        return self._scaled_directional_error(
+            error,
+            self.motion_control["positive_angular_command_scale"],
+            self.motion_control["negative_angular_command_scale"],
+        )
 
     @staticmethod
     def _command_with_min(value, limit, minimum):
@@ -195,6 +243,19 @@ class ActionExecutorClient(Node):
                 return None
             return self.current_pose
 
+    def _get_current_pose_observation(self):
+        """Return a pose with its sensor update time, including test/fallback clients."""
+        pose = self._get_current_pose()
+        if pose is None:
+            return None, None
+        pose_lock = getattr(self, "pose_lock", None)
+        if pose_lock is not None:
+            with pose_lock:
+                observation_time = getattr(self, "current_pose_time", None)
+            if observation_time is not None:
+                return pose, observation_time
+        return pose, time.monotonic()
+
     def _filter_final_control_pose(self, pose, reference_pose):
         if (
             not self.motion_control.get("final_pose_jump_filter_enable", True)
@@ -220,7 +281,7 @@ class ActionExecutorClient(Node):
         }
 
     def _closed_loop_enabled(self):
-        if self.motion_backend.enabled:
+        if self._motion_backend_enabled() and not self._motion_backend_supports_continuous_velocity():
             return False
         return bool(self.motion_control.get("enable", True))
 
@@ -398,9 +459,20 @@ class ActionExecutorClient(Node):
         return msg
 
     def _publish_motion(self, msg):
-        if self.motion_backend.enabled:
-            logger.warning("Ignoring continuous WirelessController command in GR00T backend mode.")
-            return False
+        if self._motion_backend_enabled():
+            backend = getattr(self, "motion_backend", None)
+            publish_velocity = getattr(backend, "publish_velocity", None)
+            if not callable(publish_velocity) or not self._motion_backend_supports_continuous_velocity():
+                logger.warning("Ignoring continuous WirelessController command in GR00T backend mode.")
+                return False
+            success, message, _ = publish_velocity(
+                forward=float(msg.ly),
+                lateral=-float(msg.lx),
+                yaw=-float(msg.rx),
+            )
+            if not success:
+                logger.warning("Failed to publish GR00T continuous velocity command: %s", message)
+            return bool(success)
         try:
             self.publisher.publish(msg)
             return True
@@ -412,7 +484,7 @@ class ActionExecutorClient(Node):
             return False
 
     def _publish_zero_motion(self, repeat=1, interval=0.02):
-        if self.motion_backend.enabled:
+        if self._motion_backend_enabled():
             success, _, _ = self.motion_backend.stop()
             return success
         ok = True
@@ -513,6 +585,199 @@ class ActionExecutorClient(Node):
             },
         )
         return position_ok and angle_ok
+
+    def _run_discrete_final_alignment(self, final_goal):
+        if not self.motion_control.get("final_discrete_alignment_enable", True):
+            return True
+
+        passes = max(1, int(self.motion_control["final_discrete_alignment_passes"]))
+        position_tolerance = self.motion_control["final_discrete_alignment_position_tolerance"]
+        if position_tolerance is None:
+            position_tolerance = self.motion_control["final_position_tolerance"]
+        angle_tolerance = self.motion_control["final_discrete_alignment_angle_tolerance"]
+        if angle_tolerance is None:
+            angle_tolerance = self.motion_control["final_angle_tolerance"]
+        min_translation = max(0.0, float(self.motion_control["final_discrete_alignment_min_translation"]))
+        min_angle = max(0.0, float(self.motion_control["final_discrete_alignment_min_angle"]))
+        settle_time = max(0.0, float(self.motion_control["final_discrete_alignment_settle_time"]))
+
+        self.viz.append_event(
+            "final_discrete_alignment_started",
+            level="info",
+            payload={
+                "goal": {
+                    "x": float(final_goal[0]),
+                    "y": float(final_goal[1]),
+                    "theta": float(final_goal[2]),
+                },
+                "passes": passes,
+                "position_tolerance": position_tolerance,
+                "angle_tolerance": angle_tolerance,
+                "min_translation": min_translation,
+                "min_angle": min_angle,
+            },
+        )
+
+        for pass_index in range(passes):
+            if self._stop_flag.is_set() or self._shutdown_requested():
+                return False
+
+            self._wait_for_final_alignment_settle(settle_time)
+            if not self._align_final_yaw(final_goal, angle_tolerance, min_angle, pass_index):
+                return False
+
+            self._wait_for_final_alignment_settle(settle_time)
+            if not self._align_final_position(final_goal, position_tolerance, min_translation, pass_index):
+                return False
+
+        self.viz.append_event(
+            "final_discrete_alignment_completed",
+            level="info",
+            payload={"passes": passes},
+        )
+        return True
+
+    def _wait_for_final_alignment_settle(self, settle_time):
+        if settle_time <= 0.0:
+            return
+        deadline = time.monotonic() + settle_time
+        while time.monotonic() < deadline:
+            if self._stop_flag.is_set() or self._shutdown_requested():
+                return
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+    def _align_final_yaw(self, final_goal, angle_tolerance, min_angle, pass_index):
+        error = self._final_goal_error(final_goal)
+        if error is None:
+            self.viz.append_event(
+                "final_discrete_alignment_failed",
+                level="warning",
+                payload={"stage": "yaw", "reason": "pose_unavailable", "pass": pass_index + 1},
+            )
+            return False
+
+        angle_error = error["angle"]
+        if abs(angle_error) <= angle_tolerance or abs(angle_error) < min_angle:
+            self.viz.append_event(
+                "final_discrete_alignment_step_skipped",
+                level="info",
+                payload={
+                    "stage": "yaw",
+                    "pass": pass_index + 1,
+                    "angle_error": angle_error,
+                    "angle_tolerance": angle_tolerance,
+                    "min_angle": min_angle,
+                    "pose": error["pose"],
+                },
+            )
+            return True
+
+        self.viz.append_event(
+            "final_discrete_alignment_step",
+            level="info",
+            payload={
+                "stage": "yaw",
+                "pass": pass_index + 1,
+                "command": angle_error,
+                "pose": error["pose"],
+                "goal": error["goal"],
+            },
+        )
+        success, message, _ = self.rotate(angle_error, near_goal=True)
+        if not success:
+            self.viz.append_event(
+                "final_discrete_alignment_failed",
+                level="warning",
+                payload={
+                    "stage": "yaw",
+                    "pass": pass_index + 1,
+                    "command": angle_error,
+                    "message": message,
+                },
+            )
+            return False
+        return True
+
+    def _align_final_position(self, final_goal, position_tolerance, min_translation, pass_index):
+        error = self._final_goal_error(final_goal)
+        if error is None:
+            self.viz.append_event(
+                "final_discrete_alignment_failed",
+                level="warning",
+                payload={"stage": "position", "reason": "pose_unavailable", "pass": pass_index + 1},
+            )
+            return False
+
+        if error["position"] <= position_tolerance:
+            self.viz.append_event(
+                "final_discrete_alignment_step_skipped",
+                level="info",
+                payload={
+                    "stage": "position",
+                    "pass": pass_index + 1,
+                    "position_error": error["position"],
+                    "position_tolerance": position_tolerance,
+                    "pose": error["pose"],
+                },
+            )
+            return True
+
+        pose = error["pose"]
+        goal = error["goal"]
+        theta = pose["theta"]
+        dx = goal["x"] - pose["x"]
+        dy = goal["y"] - pose["y"]
+        forward_error = math.cos(theta) * dx + math.sin(theta) * dy
+        lateral_error = -math.sin(theta) * dx + math.cos(theta) * dy
+
+        commands = [
+            ("lateral", lateral_error, self.shift),
+            ("forward", forward_error, self.forward),
+        ]
+        for stage, command, action_fn in commands:
+            if self._stop_flag.is_set() or self._shutdown_requested():
+                return False
+            if abs(command) < min_translation:
+                self.viz.append_event(
+                    "final_discrete_alignment_step_skipped",
+                    level="info",
+                    payload={
+                        "stage": stage,
+                        "pass": pass_index + 1,
+                        "command": command,
+                        "min_translation": min_translation,
+                    },
+                )
+                continue
+            self.viz.append_event(
+                "final_discrete_alignment_step",
+                level="info",
+                payload={
+                    "stage": stage,
+                    "pass": pass_index + 1,
+                    "command": command,
+                    "position_error": error["position"],
+                    "pose": pose,
+                    "goal": goal,
+                },
+            )
+            success, message, _ = action_fn(command)
+            if not success:
+                self.viz.append_event(
+                    "final_discrete_alignment_failed",
+                    level="warning",
+                    payload={
+                        "stage": stage,
+                        "pass": pass_index + 1,
+                        "command": command,
+                        "message": message,
+                    },
+                )
+                return False
+            self._wait_for_final_alignment_settle(
+                self.motion_control["final_discrete_alignment_settle_time"]
+            )
+        return True
 
     def _run_closed_loop_final_pose(self, final_goal):
         if not self._closed_loop_enabled():
@@ -640,17 +905,25 @@ class ActionExecutorClient(Node):
             forward_error = math.cos(theta) * dx + math.sin(theta) * dy
             lateral_error = -math.sin(theta) * dx + math.cos(theta) * dy
             forward_cmd = self._command_with_min(
-                self.motion_control["final_pose_kp_linear"] * forward_error,
+                self._scaled_directional_error(
+                    forward_error,
+                    self.motion_control["forward_command_scale"],
+                    self.motion_control["backward_command_scale"],
+                ),
                 self.motion_control["final_pose_max_forward_speed"],
                 self.motion_control["final_pose_min_linear_command"],
             )
             lateral_cmd = self._command_with_min(
-                self.motion_control["final_pose_kp_lateral"] * lateral_error,
-                self.motion_control["final_pose_max_lateral_speed"],
+                self._scaled_directional_error(
+                    lateral_error,
+                    self.motion_control["left_command_scale"],
+                    self.motion_control["right_command_scale"],
+                ),
+                self.motion_control["final_pose_max_lateral_command"],
                 self.motion_control["final_pose_min_linear_command"],
             )
             angular_cmd = self._command_with_min(
-                self.motion_control["final_pose_kp_angular"] * angle_error,
+                self._scaled_angular_error(angle_error),
                 self.motion_control["final_pose_max_angular_speed"],
                 self.motion_control["final_pose_min_angular_command"],
             )
@@ -699,7 +972,10 @@ class ActionExecutorClient(Node):
         return False
 
     def _resolve_final_goal(self, final_goal):
-        if self.motion_backend.enabled:
+        if self._motion_backend_enabled():
+            aligned = self._run_discrete_final_alignment(final_goal)
+            if not aligned:
+                return "replan"
             return "validated" if self._validate_final_goal(final_goal) else "replan"
         result = self._run_closed_loop_final_pose(final_goal)
         if result is True:
@@ -745,7 +1021,7 @@ class ActionExecutorClient(Node):
     def _run_closed_loop_rotate(self, angle, speed, near_goal=False):
         if not self._closed_loop_enabled():
             return None
-        start_pose = self._get_current_pose()
+        start_pose, start_pose_observation_time = self._get_current_pose_observation()
         if start_pose is None:
             self.viz.append_event(
                 "closed_loop_motion_fallback",
@@ -757,8 +1033,12 @@ class ActionExecutorClient(Node):
         target_theta = self.normalize_angle(start_pose[2] + angle)
         max_speed = min(abs(speed), self.motion_control["max_angular_speed"])
         min_angular_command = self.motion_control["min_angular_command"]
-        kp_angular = self.motion_control["kp_angular"]
-        angular_command_scale = self.motion_control["angular_command_scale"]
+        positive_angular_scale = self.motion_control["positive_angular_command_scale"]
+        negative_angular_scale = self.motion_control["negative_angular_command_scale"]
+        stop_prediction_time = self.motion_control["angular_stop_prediction_time"]
+        stop_velocity_tolerance = self.motion_control["angular_stop_velocity_tolerance"]
+        stop_stable_time = self.motion_control["angular_stop_stable_time"]
+        velocity_filter_alpha = self.motion_control["angular_velocity_filter_alpha"]
         angle_tolerance = self.motion_control["angle_tolerance"]
         timeout_margin = 0.5
         if near_goal:
@@ -770,17 +1050,25 @@ class ActionExecutorClient(Node):
                 min_angular_command,
                 self.motion_control.get("near_goal_min_angular_command", min_angular_command),
             )
-            kp_angular = self.motion_control.get("near_goal_kp_angular", kp_angular)
             angle_tolerance = self.motion_control["final_angle_tolerance"]
             timeout_margin = self.motion_control.get("near_goal_rotate_timeout_margin", timeout_margin)
         timeout = max(
             self.motion_control["min_timeout"],
-            abs(angle) * self.motion_control["rotate_timeout_per_rad"] + timeout_margin,
+            abs(angle) * self.motion_control["rotate_timeout_per_rad"]
+            + timeout_margin
+            + stop_prediction_time
+            + stop_stable_time,
         )
         start_time = time.monotonic()
         last_error = None
         accepted_pose = start_pose
         jump_rejections = 0
+        previous_yaw = start_pose[2]
+        previous_pose_time = start_pose_observation_time
+        filtered_yaw_velocity = 0.0
+        stable_since = None
+        braking = False
+        rotation_direction = 1.0 if angle >= 0.0 else -1.0
         self.viz.append_event(
             "closed_loop_rotate_started",
             level="info",
@@ -791,8 +1079,9 @@ class ActionExecutorClient(Node):
                 "speed": speed,
                 "max_speed": max_speed,
                 "min_command": min_angular_command,
-                "kp": kp_angular,
-                "command_scale": angular_command_scale,
+                "positive_command_scale": positive_angular_scale,
+                "negative_command_scale": negative_angular_scale,
+                "stop_prediction_time": stop_prediction_time,
                 "tolerance": angle_tolerance,
                 "timeout": timeout,
                 "near_goal": bool(near_goal),
@@ -833,7 +1122,7 @@ class ActionExecutorClient(Node):
             if paused_duration > 0:
                 start_time += paused_duration
                 continue
-            raw_pose = self._get_current_pose()
+            raw_pose, pose_observation_time = self._get_current_pose_observation()
             if raw_pose is None:
                 self.viz.append_event(
                     "closed_loop_motion_fallback",
@@ -858,9 +1147,31 @@ class ActionExecutorClient(Node):
             else:
                 pose = raw_pose
                 rejected_jump = False
+            pose_time = time.monotonic()
+            pose_dt = pose_observation_time - previous_pose_time
+            if pose_dt >= 1e-3:
+                measured_yaw_velocity = self.normalize_angle(pose[2] - previous_yaw) / pose_dt
+                measured_yaw_velocity = self._clamp(measured_yaw_velocity, -4.0, 4.0)
+                filtered_yaw_velocity = (
+                    velocity_filter_alpha * measured_yaw_velocity
+                    + (1.0 - velocity_filter_alpha) * filtered_yaw_velocity
+                )
+                previous_yaw = pose[2]
+                previous_pose_time = pose_observation_time
             error = self.normalize_angle(target_theta - pose[2])
+            yaw_velocity_toward_target = rotation_direction * filtered_yaw_velocity
+            remaining_angle = rotation_direction * error
+            predicted_stop_angle = max(0.0, yaw_velocity_toward_target) * stop_prediction_time
             last_error = error
-            if abs(error) <= angle_tolerance:
+            within_tolerance = abs(error) <= angle_tolerance
+            nearly_stopped = abs(filtered_yaw_velocity) <= stop_velocity_tolerance
+            if within_tolerance and nearly_stopped:
+                if stable_since is None:
+                    stable_since = pose_time
+                if pose_time - stable_since < stop_stable_time:
+                    self._publish_zero_motion()
+                    time.sleep(0.02)
+                    continue
                 self._publish_stop_motion()
                 self.viz.append_event(
                     "closed_loop_rotate_completed",
@@ -874,7 +1185,8 @@ class ActionExecutorClient(Node):
                         "tolerance": angle_tolerance,
                         "elapsed": time.monotonic() - start_time,
                         "near_goal": bool(near_goal),
-                        "reason": "within_tolerance",
+                        "yaw_velocity": filtered_yaw_velocity,
+                        "reason": "settled_within_tolerance",
                     },
                 )
                 if near_goal:
@@ -890,16 +1202,36 @@ class ActionExecutorClient(Node):
                         },
                     )
                 return True
+            stable_since = None
 
             if rejected_jump:
                 time.sleep(0.02)
                 continue
 
-            angular_cmd = self._command_with_min(
-                kp_angular * error * angular_command_scale,
-                max_speed,
-                min_angular_command,
+            should_brake = (
+                yaw_velocity_toward_target > stop_velocity_tolerance
+                and remaining_angle <= predicted_stop_angle + angle_tolerance
             )
+            if should_brake:
+                angular_cmd = 0.0
+                if not braking:
+                    self.viz.append_event(
+                        "closed_loop_rotate_braking",
+                        level="info",
+                        payload={
+                            "remaining_angle": remaining_angle,
+                            "yaw_velocity": filtered_yaw_velocity,
+                            "predicted_stop_angle": predicted_stop_angle,
+                        },
+                    )
+                braking = True
+            else:
+                braking = False
+                angular_cmd = self._command_with_min(
+                    self._scaled_angular_error(error),
+                    max_speed,
+                    min_angular_command,
+                )
             msg = WirelessController()
             msg.lx = 0.0
             msg.ly = 0.0
@@ -972,6 +1304,33 @@ class ActionExecutorClient(Node):
                 },
             )
             return True
+        if last_error is not None and abs(last_error) <= angle_tolerance:
+            self.viz.append_event(
+                "closed_loop_rotate_completed",
+                level="warning",
+                payload={
+                    "success": True,
+                    "target": angle,
+                    "target_theta": target_theta,
+                    "remaining_error": last_error,
+                    "tolerance": angle_tolerance,
+                    "elapsed": time.monotonic() - start_time,
+                    "near_goal": bool(near_goal),
+                    "reason": "within_tolerance_after_timeout",
+                },
+            )
+            self.viz.append_event(
+                "closed_loop_motion_accepted",
+                level="warning",
+                payload={
+                    "motion": "rotate",
+                    "target": angle,
+                    "remaining_error": last_error,
+                    "tolerance": angle_tolerance,
+                    "reason": "within_tolerance_after_timeout",
+                },
+            )
+            return True
         self.viz.append_event(
             "closed_loop_rotate_timeout",
             level="warning",
@@ -997,10 +1356,211 @@ class ActionExecutorClient(Node):
         )
         return False
 
+    def _should_use_combined_waypoint(self, theta, distance):
+        return (
+            self._closed_loop_enabled()
+            and abs(float(distance)) > 1e-6
+            and abs(float(theta)) < self.motion_control["waypoint_turn_in_place_threshold"]
+        )
+
+    def _run_closed_loop_waypoint(self, delta_theta, distance, speed=1.0, near_goal=False):
+        """Drive toward one planned waypoint with simultaneous linear/yaw control."""
+        if not self._closed_loop_enabled():
+            return None
+        start_pose, start_pose_observation_time = self._get_current_pose_observation()
+        if start_pose is None:
+            self.viz.append_event(
+                "closed_loop_motion_fallback",
+                level="warning",
+                payload={"motion": "waypoint", "reason": "pose_unavailable"},
+            )
+            return None
+
+        start_x, start_y, start_theta = start_pose
+        target_theta = self.normalize_angle(start_theta + delta_theta)
+        target_x = start_x + distance * math.cos(target_theta)
+        target_y = start_y + distance * math.sin(target_theta)
+        max_forward = min(abs(speed), self.motion_control["waypoint_max_forward_speed"])
+        min_forward = self.motion_control["waypoint_min_forward_command"]
+        turn_threshold = self.motion_control["waypoint_turn_in_place_threshold"]
+        position_tolerance = (
+            self.motion_control["final_position_tolerance"]
+            if near_goal
+            else self.motion_control["position_tolerance"]
+        )
+        stop_prediction_time = self.motion_control["linear_stop_prediction_time"]
+        stop_velocity_tolerance = self.motion_control["linear_stop_velocity_tolerance"]
+        stop_stable_time = self.motion_control["linear_stop_stable_time"]
+        velocity_filter_alpha = self.motion_control["linear_velocity_filter_alpha"]
+        timeout = max(
+            self.motion_control["min_timeout"],
+            abs(distance) * self.motion_control["waypoint_timeout_per_meter"],
+            abs(delta_theta) * self.motion_control["rotate_timeout_per_rad"],
+        ) + 0.5 + stop_prediction_time + stop_stable_time
+        start_time = time.monotonic()
+        previous_pose = start_pose
+        previous_pose_time = start_pose_observation_time
+        previous_distance = abs(distance)
+        filtered_approach_velocity = 0.0
+        stable_since = None
+        braking = False
+        last_error = None
+
+        self.viz.append_event(
+            "closed_loop_waypoint_started",
+            payload={
+                "target": {"x": target_x, "y": target_y, "theta": target_theta},
+                "delta_theta": delta_theta,
+                "distance": distance,
+                "turn_in_place_threshold": turn_threshold,
+                "timeout": timeout,
+                "near_goal": bool(near_goal),
+            },
+        )
+
+        while time.monotonic() - start_time < timeout:
+            if self._action_preempt_requested():
+                self._publish_stop_motion()
+                return PREEMPTED
+            if self._stop_flag.is_set() or self._shutdown_requested():
+                self._publish_stop_motion()
+                return False
+            paused_duration = self._wait_while_paused(motion="waypoint")
+            if paused_duration > 0:
+                start_time += paused_duration
+                continue
+            pose, pose_observation_time = self._get_current_pose_observation()
+            if pose is None:
+                self._publish_stop_motion()
+                self.viz.append_event(
+                    "closed_loop_motion_fallback",
+                    level="warning",
+                    payload={"motion": "waypoint", "reason": "pose_stale"},
+                )
+                return None
+
+            x, y, theta = pose
+            dx = target_x - x
+            dy = target_y - y
+            position_error = math.hypot(dx, dy)
+            bearing = math.atan2(dy, dx) if position_error > 1e-9 else theta
+            bearing_error = self.normalize_angle(bearing - theta)
+            pose_dt = pose_observation_time - previous_pose_time
+            if pose_dt >= 1e-3:
+                measured_velocity = (previous_distance - position_error) / pose_dt
+                measured_velocity = self._clamp(measured_velocity, -2.0, 2.0)
+                filtered_approach_velocity = (
+                    velocity_filter_alpha * measured_velocity
+                    + (1.0 - velocity_filter_alpha) * filtered_approach_velocity
+                )
+                previous_pose = pose
+                previous_pose_time = pose_observation_time
+                previous_distance = position_error
+            predicted_stop_distance = max(0.0, filtered_approach_velocity) * stop_prediction_time
+            last_error = {
+                "position": position_error,
+                "bearing": bearing_error,
+                "approach_velocity": filtered_approach_velocity,
+                "predicted_stop_distance": predicted_stop_distance,
+            }
+
+            within_tolerance = position_error <= position_tolerance
+            nearly_stopped = abs(filtered_approach_velocity) <= stop_velocity_tolerance
+            now = time.monotonic()
+            if within_tolerance and nearly_stopped:
+                if stable_since is None:
+                    stable_since = now
+                if now - stable_since >= stop_stable_time:
+                    self._publish_stop_motion()
+                    self.viz.append_event(
+                        "closed_loop_waypoint_completed",
+                        payload={
+                            "target": {"x": target_x, "y": target_y},
+                            "remaining_error": last_error,
+                            "elapsed": now - start_time,
+                            "reason": "settled_within_tolerance",
+                        },
+                    )
+                    return True
+            else:
+                stable_since = None
+
+            should_brake = (
+                filtered_approach_velocity > stop_velocity_tolerance
+                and position_error <= predicted_stop_distance + position_tolerance
+            )
+            if should_brake or within_tolerance or abs(bearing_error) >= turn_threshold:
+                forward_cmd = 0.0
+                if should_brake and not braking:
+                    self.viz.append_event(
+                        "closed_loop_waypoint_braking",
+                        payload={"remaining_error": last_error},
+                    )
+                braking = should_brake
+            else:
+                braking = False
+                raw_forward = self._scaled_directional_error(
+                    position_error,
+                    self.motion_control["forward_command_scale"],
+                    self.motion_control["backward_command_scale"],
+                )
+                heading_scale = max(0.0, math.cos(bearing_error))
+                forward_cmd = self._command_with_min(
+                    raw_forward * heading_scale,
+                    max_forward,
+                    min_forward,
+                )
+            angular_cmd = self._command_with_min(
+                self._scaled_angular_error(bearing_error),
+                self.motion_control["max_angular_speed"],
+                self.motion_control["min_angular_command"],
+            )
+            if within_tolerance:
+                angular_cmd = 0.0
+
+            msg = WirelessController()
+            msg.lx = 0.0
+            msg.ly = forward_cmd
+            msg.rx = -angular_cmd
+            msg.ry = 0.0
+            msg.keys = 0
+            if not self._publish_motion(msg):
+                return False
+            time.sleep(0.02)
+
+        self._publish_stop_motion()
+        if last_error is not None and last_error["position"] <= position_tolerance:
+            self.viz.append_event(
+                "closed_loop_waypoint_completed",
+                level="warning",
+                payload={
+                    "target": {"x": target_x, "y": target_y},
+                    "remaining_error": last_error,
+                    "elapsed": time.monotonic() - start_time,
+                    "reason": "within_tolerance_after_timeout",
+                },
+            )
+            return True
+        self.viz.append_event(
+            "closed_loop_waypoint_timeout",
+            level="warning",
+            payload={
+                "target": {"x": target_x, "y": target_y},
+                "remaining_error": last_error,
+                "timeout": timeout,
+            },
+        )
+        self.viz.append_event(
+            "closed_loop_motion_timeout",
+            level="warning",
+            payload={"motion": "waypoint", "remaining_error": last_error, "timeout": timeout},
+        )
+        return False
+
     def _run_closed_loop_forward(self, distance, speed, near_goal=False):
         if not self._closed_loop_enabled():
             return None
-        start_pose = self._get_current_pose()
+        start_pose, start_pose_observation_time = self._get_current_pose_observation()
         if start_pose is None:
             self.viz.append_event(
                 "closed_loop_motion_fallback",
@@ -1013,15 +1573,28 @@ class ActionExecutorClient(Node):
         target_x = start_x + distance * math.cos(start_theta)
         target_y = start_y + distance * math.sin(start_theta)
         max_forward = min(abs(speed), self.motion_control["max_forward_speed"])
-        max_lateral = self.motion_control["max_lateral_speed"]
+        max_lateral = self.motion_control["max_lateral_command"]
         timeout = max(
             self.motion_control["min_timeout"],
-            abs(distance) * self.motion_control["forward_timeout_per_meter"] + 0.5,
+            abs(distance) * self.motion_control["forward_timeout_per_meter"]
+            + 0.5
+            + self.motion_control["linear_stop_prediction_time"]
+            + self.motion_control["linear_stop_stable_time"],
         )
         start_time = time.monotonic()
         last_error = None
         accepted_pose = start_pose
         jump_rejections = 0
+        previous_pose = start_pose
+        previous_pose_time = start_pose_observation_time
+        filtered_path_velocity = 0.0
+        stable_since = None
+        braking = False
+        motion_direction = 1.0 if distance >= 0.0 else -1.0
+        stop_prediction_time = self.motion_control["linear_stop_prediction_time"]
+        stop_velocity_tolerance = self.motion_control["linear_stop_velocity_tolerance"]
+        stop_stable_time = self.motion_control["linear_stop_stable_time"]
+        velocity_filter_alpha = self.motion_control["linear_velocity_filter_alpha"]
         self.viz.append_event(
             "closed_loop_forward_started",
             level="info",
@@ -1033,6 +1606,8 @@ class ActionExecutorClient(Node):
                 "max_forward": max_forward,
                 "max_lateral": max_lateral,
                 "tolerance": self.motion_control["position_tolerance"],
+                "stop_prediction_time": stop_prediction_time,
+                "stop_velocity_tolerance": stop_velocity_tolerance,
                 "timeout": timeout,
                 "near_goal": bool(near_goal),
             },
@@ -1072,7 +1647,7 @@ class ActionExecutorClient(Node):
             if paused_duration > 0:
                 start_time += paused_duration
                 continue
-            raw_pose = self._get_current_pose()
+            raw_pose, pose_observation_time = self._get_current_pose_observation()
             if raw_pose is None:
                 self.viz.append_event(
                     "closed_loop_motion_fallback",
@@ -1099,15 +1674,46 @@ class ActionExecutorClient(Node):
                 rejected_jump = False
 
             x, y, theta = pose
+            pose_time = time.monotonic()
+            pose_dt = pose_observation_time - previous_pose_time
+            if pose_dt >= 1e-3:
+                path_delta = (
+                    math.cos(start_theta) * (x - previous_pose[0])
+                    + math.sin(start_theta) * (y - previous_pose[1])
+                )
+                measured_path_velocity = motion_direction * path_delta / pose_dt
+                # Reject impossible localization spikes without hiding normal gait response.
+                measured_path_velocity = self._clamp(measured_path_velocity, -2.0, 2.0)
+                filtered_path_velocity = (
+                    velocity_filter_alpha * measured_path_velocity
+                    + (1.0 - velocity_filter_alpha) * filtered_path_velocity
+                )
+                previous_pose = pose
+                previous_pose_time = pose_observation_time
             dx = target_x - x
             dy = target_y - y
             position_error = math.hypot(dx, dy)
             heading_error = self.normalize_angle(start_theta - theta)
+            remaining_path_distance = motion_direction * (
+                math.cos(start_theta) * dx + math.sin(start_theta) * dy
+            )
+            predicted_stop_distance = max(0.0, filtered_path_velocity) * stop_prediction_time
             last_error = {
                 "position": position_error,
                 "heading": heading_error,
+                "remaining_path_distance": remaining_path_distance,
+                "path_velocity": filtered_path_velocity,
+                "predicted_stop_distance": predicted_stop_distance,
             }
-            if position_error <= self.motion_control["position_tolerance"]:
+            within_tolerance = position_error <= self.motion_control["position_tolerance"]
+            nearly_stopped = abs(filtered_path_velocity) <= stop_velocity_tolerance
+            if within_tolerance and nearly_stopped:
+                if stable_since is None:
+                    stable_since = pose_time
+                if pose_time - stable_since < stop_stable_time:
+                    self._publish_zero_motion()
+                    time.sleep(0.02)
+                    continue
                 self._publish_stop_motion()
                 self.viz.append_event(
                     "closed_loop_forward_completed",
@@ -1121,10 +1727,11 @@ class ActionExecutorClient(Node):
                         "tolerance": self.motion_control["position_tolerance"],
                         "elapsed": time.monotonic() - start_time,
                         "near_goal": bool(near_goal),
-                        "reason": "within_tolerance",
+                        "reason": "settled_within_tolerance",
                     },
                 )
                 return True
+            stable_since = None
 
             if rejected_jump:
                 time.sleep(0.02)
@@ -1132,18 +1739,46 @@ class ActionExecutorClient(Node):
 
             forward_error = math.cos(theta) * dx + math.sin(theta) * dy
             lateral_error = -math.sin(theta) * dx + math.cos(theta) * dy
-            forward_cmd = self._command_with_min(
-                self.motion_control["kp_linear"] * forward_error,
-                max_forward,
-                self.motion_control["min_linear_command"],
+            should_brake = (
+                filtered_path_velocity > stop_velocity_tolerance
+                and remaining_path_distance
+                <= predicted_stop_distance + self.motion_control["position_tolerance"]
             )
+            if should_brake:
+                forward_cmd = 0.0
+                if not braking:
+                    self.viz.append_event(
+                        "closed_loop_forward_braking",
+                        level="info",
+                        payload={
+                            "remaining_path_distance": remaining_path_distance,
+                            "path_velocity": filtered_path_velocity,
+                            "predicted_stop_distance": predicted_stop_distance,
+                        },
+                    )
+                braking = True
+            else:
+                braking = False
+                forward_cmd = self._command_with_min(
+                    self._scaled_directional_error(
+                        forward_error,
+                        self.motion_control["forward_command_scale"],
+                        self.motion_control["backward_command_scale"],
+                    ),
+                    max_forward,
+                    self.motion_control["min_linear_command"],
+                )
             lateral_cmd = self._clamp(
-                self.motion_control["kp_lateral"] * lateral_error,
+                self._scaled_directional_error(
+                    lateral_error,
+                    self.motion_control["left_command_scale"],
+                    self.motion_control["right_command_scale"],
+                ),
                 -max_lateral,
                 max_lateral,
             )
             angular_cmd = self._clamp(
-                self.motion_control["kp_angular"] * heading_error,
+                self._scaled_angular_error(heading_error),
                 -self.motion_control["max_angular_speed"],
                 self.motion_control["max_angular_speed"],
             )
@@ -1327,7 +1962,32 @@ class ActionExecutorClient(Node):
                     self._wait_while_paused()
                     if self._stop_flag.is_set() or self._new_action_event.is_set():
                         break
-                    # logger.info(f'next action is turn {theta} and forward {distance}')
+                    use_combined_waypoint = self._should_use_combined_waypoint(theta, distance)
+                    self.viz.append_event(
+                        "action_motion_mode_selected",
+                        payload={
+                            "mode": "combined" if use_combined_waypoint else "turn_in_place",
+                            "theta": theta,
+                            "distance": distance,
+                            "threshold": self.motion_control["waypoint_turn_in_place_threshold"],
+                        },
+                    )
+                    if use_combined_waypoint:
+                        waypoint_result = self._run_closed_loop_waypoint(
+                            theta,
+                            distance,
+                            near_goal=near_goal,
+                        )
+                        if waypoint_result is True:
+                            continue
+                        if waypoint_result == PREEMPTED:
+                            action_preempted = True
+                            break
+                        if waypoint_result is False:
+                            logger.warning("Combined waypoint action failed.")
+                            action_failed = True
+                            break
+                        # Missing/stale pose falls back to the established sequential path.
                     rotate_success, rotate_msg, _ = self.rotate(theta, near_goal=near_goal)
                     if not rotate_success:
                         if rotate_msg == "preempted.":
@@ -1362,6 +2022,14 @@ class ActionExecutorClient(Node):
                     continue
                 if self._new_action_event.is_set():
                     continue
+                finish_segment = getattr(self.motion_backend, "finish_segment", None)
+                if (not self._stop_flag.is_set() and not self._shutdown_requested()
+                        and self._motion_backend_enabled() and callable(finish_segment)):
+                    finish_success, finish_message, _ = finish_segment()
+                    if not finish_success:
+                        logger.warning("Navigation segment recovery failed: %s", finish_message)
+                        self._handle_action_failure(near_goal=near_goal)
+                        continue
                 if near_goal and final_goal is not None:
                     final_status = self._resolve_final_goal(final_goal)
                     if final_status == "validated":
@@ -1433,7 +2101,7 @@ class ActionExecutorClient(Node):
             self.thread.join(timeout=timeout_sec)
 
     def forward(self, distance = 1.0, speed = 1.0, near_goal=False):
-        if self.motion_backend.enabled:
+        if self._motion_backend_enabled():
             if self._stop_flag.is_set() or self._shutdown_requested():
                 return False, 'stopped.', -2
             return self.motion_backend.forward(float(distance))
@@ -1476,7 +2144,7 @@ class ActionExecutorClient(Node):
         return result_holder['success_flag'], result_holder['msg'], result_holder['code']
 
     def shift(self, distance = 1.0, speed = 0.5):
-        if self.motion_backend.enabled:
+        if self._motion_backend_enabled():
             if self._stop_flag.is_set() or self._shutdown_requested():
                 return False, 'stopped.', -2
             return self.motion_backend.shift(float(distance))
@@ -1508,7 +2176,7 @@ class ActionExecutorClient(Node):
         return result_holder['success_flag'], result_holder['msg'], result_holder['code']
 
     def rotate(self, angle = math.pi/2, speed = math.pi/2, near_goal=False):
-        if self.motion_backend.enabled:
+        if self._motion_backend_enabled():
             if self._stop_flag.is_set() or self._shutdown_requested():
                 return False, 'stopped.', -2
             return self.motion_backend.rotate(float(angle))
