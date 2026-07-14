@@ -13,7 +13,11 @@
 #
 # 用法:
 #   cd ~/zihou/box_demo_1
-#   bash start_g1_onboard_nav.sh
+#   bash start_g1_onboard_nav.sh dwbc                    # 0.76m, warm-up 默认关
+#   bash start_g1_onboard_nav.sh dwbc --warmup on        # 恢复 0.60s 预热
+#   bash start_g1_onboard_nav.sh dwbc --warmup-time 0.35 # 自定义预热
+#   bash start_g1_onboard_nav.sh dwbc --print-config     # 只检查，不启动
+#   bash start_g1_onboard_nav.sh                         # 兼容旧用法，等同 dwbc
 #   bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 #   bash start_g1_onboard_nav.sh --dry-run --no-attach
 
@@ -21,6 +25,18 @@ set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SESSION="${SESSION:-g1-onboard-nav}"
+
+# 兼容旧的不带 controller 参数用法，同时让用户要求的 `... nav.sh dwbc`
+# 成为显式且受校验的入口。该 launcher 只支持 DWBC。
+CTRL="dwbc"
+if [[ $# -gt 0 && "$1" != --* ]]; then
+    CTRL="$1"
+    shift
+fi
+if [[ "$CTRL" != "dwbc" ]]; then
+    echo "unsupported controller: $CTRL (start_g1_onboard_nav.sh only supports dwbc)"
+    exit 2
+fi
 
 IFACE="${IFACE:-${UNITREE_DDS_INTERFACE:-enP8p1s0}}"
 DOMAIN="${DOMAIN:-0}"
@@ -36,14 +52,19 @@ TORCH_THREADS="${TORCH_THREADS:-2}"
 # ⚠️ YAW_MAX 别低于 0.4: 真机 yaw 跟踪率 ~78%, 0.30 时有效转速仅 ~0.23rad/s
 # 太临界, 叠加轻微不对称会单侧转不动(2026-07-04 001 左转事件)。
 FWD_MAX="${FWD_MAX:-0.50}"          # 前向速度上限 m/s (速度指标测试才要 1.3)
-LAT_MAX="${LAT_MAX:-0.40}"          # 横向速度上限 m/s
+LAT_MAX="${LAT_MAX:-0.30}"          # 与手动 DWBC adapter 默认一致
 YAW_MAX="${YAW_MAX:-0.60}"          # 转向角速度上限 rad/s
 HEIGHT_RATE="${HEIGHT_RATE:-0.20}"  # 高度变化速率上限 m/s
 # 稳走关键高度参数(= adapter 默认, 显式写出防默认漂移; sim round11 标定):
-STAND_HEIGHT="${STAND_HEIGHT:-0.74}"  # 行走一律站高(0.74 最优, 0.78 不更稳)
+STAND_HEIGHT="${STAND_HEIGHT:-0.76}"  # 与当前手动 DWBC 真机验证配置一致
 WALK_FLOOR="${WALK_FLOOR:-0.72}"      # 低位拒走 warmup 地板(拦速度打印 [GATE])
+WARMUP_MODE="${DWBC_WARMUP_MODE:-off}"
+WARMUP_TIME="${DWBC_WARMUP_TIME:-0.60}"
+WARMUP_SPEED="${DWBC_WARMUP_SPEED:-0.15}"
+WAIST_RL="${WAIST_RL:-1}"
 DRY_RUN=""
 ATTACH=1
+PRINT_CONFIG=0
 AUTO_POLICY_ARGS=""
 ADAPTER_EXTRA=()
 
@@ -74,9 +95,37 @@ while [[ $# -gt 0 ]]; do
         --height-rate) HEIGHT_RATE="$2"; ADAPTER_EXTRA+=("--height-rate" "$2"); shift 2 ;;
         --stand-height) STAND_HEIGHT="$2"; shift 2 ;;
         --walk-height-floor) WALK_FLOOR="$2"; shift 2 ;;
+        --warmup)
+            [[ $# -ge 2 ]] || { echo "--warmup 需要 on 或 off"; exit 2; }
+            WARMUP_MODE="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+            shift 2
+            ;;
+        --warmup=*)
+            WARMUP_MODE="${1#*=}"
+            WARMUP_MODE="$(printf '%s' "$WARMUP_MODE" | tr '[:upper:]' '[:lower:]')"
+            shift
+            ;;
+        --no-warmup) WARMUP_MODE="off"; shift ;;
+        --warmup-time)
+            [[ $# -ge 2 ]] || { echo "--warmup-time 缺少秒数"; exit 2; }
+            WARMUP_TIME="$2"
+            WARMUP_MODE="on"
+            shift 2
+            ;;
+        --warmup-time=*)
+            WARMUP_TIME="${1#*=}"
+            WARMUP_MODE="on"
+            shift
+            ;;
+        --warmup-speed)
+            [[ $# -ge 2 ]] || { echo "--warmup-speed 缺少速度"; exit 2; }
+            WARMUP_SPEED="$2"
+            shift 2
+            ;;
         --dry-run) DRY_RUN="--dry-run"; shift ;;
         --no-auto-activate-policy) AUTO_POLICY_ARGS="--no-auto-activate-policy"; shift ;;
         --no-attach) ATTACH=0; shift ;;
+        --print-config) PRINT_CONFIG=1; shift ;;
         *) ADAPTER_EXTRA+=("$1"); shift ;;
     esac
 done
@@ -93,6 +142,48 @@ case "$NAV_MOTION_PROFILE" in
         exit 2
         ;;
 esac
+
+case "$WARMUP_MODE" in
+    on|true|yes|1) WARMUP_MODE="on" ;;
+    off|false|no|0) WARMUP_MODE="off" ;;
+    *) echo "非法 --warmup: $WARMUP_MODE（使用 on 或 off）"; exit 2 ;;
+esac
+
+if [[ ! "$STAND_HEIGHT" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+        || ! awk -v h="$STAND_HEIGHT" 'BEGIN { exit !(h >= 0.40 && h <= 0.80) }'; then
+    echo "非法 --stand-height: $STAND_HEIGHT（允许 0.40..0.80 米）"
+    exit 2
+fi
+if [[ ! "$WARMUP_TIME" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+        || [[ ! "$WARMUP_SPEED" =~ ^[0-9]+([.][0-9]+)?$ ]] \
+        || ! awk -v t="$WARMUP_TIME" -v v="$WARMUP_SPEED" \
+            'BEGIN { exit !(t >= 0.0 && t <= 3.0 && v > 0.05 && v <= 0.50) }'; then
+    echo "warm-up 超出范围: time 允许 0..3s，speed 允许 (0.05, 0.50]m/s"
+    exit 2
+fi
+if [[ "$WARMUP_MODE" == "on" ]]; then
+    WARMUP_EFFECTIVE="$WARMUP_TIME"
+else
+    WARMUP_EFFECTIVE="0.0"
+fi
+case "$WAIST_RL" in
+    0|1) ;;
+    *) echo "WAIST_RL 只允许 0 或 1"; exit 2 ;;
+esac
+
+if [[ "$PRINT_CONFIG" == "1" ]]; then
+    echo "controller=$CTRL"
+    echo "stand_height=$STAND_HEIGHT"
+    echo "walk_height_floor=$WALK_FLOOR"
+    echo "nav_motion_profile=$NAV_MOTION_PROFILE"
+    echo "nav_warmup=$WARMUP_MODE"
+    echo "nav_warmup_time=$WARMUP_EFFECTIVE"
+    echo "nav_warmup_speed=$WARMUP_SPEED"
+    echo "waist_to_rl_on_motion=$WAIST_RL"
+    echo "limits=fwd:$FWD_MAX,lat:$LAT_MAX,yaw:$YAW_MAX,height_rate:$HEIGHT_RATE"
+    echo "nav_runtime_config=$NAV_PROFILE_FILE"
+    exit 0
+fi
 
 if [[ ! -d "$GROOT_REPO/decoupled_wbc" ]]; then
     echo "GR00T repo not found: $GROOT_REPO"
@@ -129,24 +220,64 @@ if ! ping -c1 -W1 192.168.123.161 >/dev/null 2>&1; then
     echo "[WARN] 内网 MCU(192.168.123.161) ping 不通。dry-run 可继续，真机运动前必须修复。"
 fi
 
-python3 - "$NAV_MOTION_PROFILE" "$NAV_PROFILE_FILE" <<'PY'
+# run_ros.py 在另一个终端/conda 环境启动，无法继承本 launcher 的 shell
+# export。把两边必须一致的值原子写入 profile，motion_backend.py 启动时读取。
+python3 - "$NAV_PROFILE_FILE" "$NAV_MOTION_PROFILE" "$STAND_HEIGHT" \
+    "$WALK_FLOOR" "$WARMUP_MODE" "$WARMUP_EFFECTIVE" "$WARMUP_SPEED" \
+    "$FWD_MAX" "$LAT_MAX" "$YAW_MAX" "$WAIST_RL" <<'PY'
 import json
 import os
 import sys
+import tempfile
 import time
 
-profile, path = sys.argv[1], sys.argv[2]
+(
+    path,
+    motion_profile,
+    stand_height,
+    walk_floor,
+    warmup_mode,
+    warmup_time,
+    warmup_speed,
+    fwd_max,
+    lat_max,
+    yaw_max,
+    waist_rl,
+) = sys.argv[1:]
+directory = os.path.dirname(path) or "/tmp"
+os.makedirs(directory, exist_ok=True)
 payload = {
-    "motion_profile": profile,
-    "taptap_optimized": os.environ.get("GROOT_NAV_TAPTAP_LIMITS", "0").lower()
+    "schema_version": 2,
+    "source": "start_g1_onboard_nav.sh",
+    "motion_profile": motion_profile,
+    "taptap_recovery": os.environ.get("GROOT_TAPTAP_ADAPTIVE", "0").lower()
     in ("1", "true", "yes", "on"),
+    "stand_height": float(stand_height),
+    "walk_min_height": float(walk_floor),
+    "warmup_enabled": warmup_mode == "on",
+    "warmup_time": float(warmup_time),
+    "warmup_speed": float(warmup_speed),
+    "fwd_max": float(fwd_max),
+    "back_max": min(0.20, float(fwd_max)),
+    "lat_max": float(lat_max),
+    "yaw_max": float(yaw_max),
+    "v_floor": 0.12,
+    "w_floor": 0.10,
+    "waist_to_rl_on_motion": waist_rl == "1",
     "updated_at": time.time(),
-    "note": "Read by nav_uat Node/motion_backend.py. precise keeps min_duration/min_distance; keyboard uses keyboard cruise speeds. Warm-up remains enabled in both modes.",
 }
-tmp = f"{path}.{os.getpid()}.tmp"
-with open(tmp, "w", encoding="utf-8") as f:
-    json.dump(payload, f, ensure_ascii=False, indent=2)
-os.replace(tmp, path)
+fd, tmp = tempfile.mkstemp(prefix=".groot_nav_profile.", suffix=".json", dir=directory)
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+    os.replace(tmp, path)
+except Exception:
+    try:
+        os.unlink(tmp)
+    except FileNotFoundError:
+        pass
+    raise
 PY
 
 echo "========================================"
@@ -156,18 +287,25 @@ echo "  conda env:    $CONDA_ENV"
 echo "  GROOT_REPO:   $GROOT_REPO"
 echo "  limits:       fwd=$FWD_MAX lat=$LAT_MAX yaw=$YAW_MAX height_rate=$HEIGHT_RATE"
 echo "  height:       stand=$STAND_HEIGHT walk_floor=$WALK_FLOOR (低位拒走 warmup)"
+echo "  box warm-up:  $WARMUP_MODE (${WARMUP_EFFECTIVE}s @ ${WARMUP_SPEED}m/s)"
+echo "  waist owner:  motion->RL=$WAIST_RL"
 echo "  HTTP bridge:  http://$HTTP_HOST:$HTTP_PORT -> $LEGACY_CMD_FILE"
 echo "  nav profile:  $NAV_MOTION_PROFILE ($NAV_PROFILE_FILE)"
 echo "  dry-run:      ${DRY_RUN:-no}"
 echo "========================================"
 
+MERGE_EXTRA=""
+if [[ "$WAIST_RL" == "1" ]]; then
+    MERGE_EXTRA="--waist-to-rl-on-motion"
+fi
+
 tmux new-session -d -s "$SESSION" -n nav "
     $SETUP; cd '$SCRIPT_DIR'
-    echo '=== pane1: merger rt/lowcmd_rl + rt/arm_sdk -> rt/lowcmd ==='
+    echo '=== pane1: merger rt/lowcmd_rl + rt/arm_sdk -> rt/lowcmd (WAIST_RL=$WAIST_RL) ==='
     if [[ -n '$DRY_RUN' ]]; then
         echo 'dry-run: merger is not started, so rt/lowcmd is not published'
     else
-        python '$SCRIPT_DIR/merge_lowcmd_arm_sdk.py' --iface '$IFACE'
+        python '$SCRIPT_DIR/merge_lowcmd_arm_sdk.py' --iface '$IFACE' $MERGE_EXTRA
     fi
     echo '[merge exited]'; exec bash"
 
@@ -197,7 +335,10 @@ tmux split-window -v -t "$SESSION:0.1" "
         --backend legacy-ipc \
         --host '$HTTP_HOST' \
         --port '$HTTP_PORT' \
-        --legacy-cmd-file '$LEGACY_CMD_FILE'
+        --legacy-cmd-file '$LEGACY_CMD_FILE' \
+        --stand-height '$STAND_HEIGHT' \
+        --min-height 0.40 \
+        --max-height 0.80
     echo '[HTTP IPC bridge exited]'; exec bash"
 
 tmux select-layout -t "$SESSION" tiled
@@ -210,7 +351,9 @@ tmux split-window -v -t "$SESSION:0.0" "
     echo '=== pane4: direct IPC keyboard (same as start_g1_onboard.sh) ==='
     echo 'w/s/a/d/q/e move, z/x height, space stop, o DAMP. Do not use during active ROS nav commands.'
     # 统一键速(7-06): 前进0.40(后退被 adapter 硬截0.2), vy 0.25(round12), wz 0.40
-    python '$SCRIPT_DIR/agile_keyboard_control.py' --key-timeout 0.25 --vx 0.40 --vy 0.25 --wz 0.40
+    python '$SCRIPT_DIR/agile_keyboard_control.py' --key-timeout 0.25 \
+        --vx 0.40 --vy 0.25 --wz 0.40 \
+        --stand-height '$STAND_HEIGHT' --min-height 0.40 --max-height 0.80
     echo '[keyboard exited]'; exec bash"
 
 tmux select-layout -t "$SESSION" tiled

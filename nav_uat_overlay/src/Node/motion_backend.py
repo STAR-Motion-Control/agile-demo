@@ -80,56 +80,12 @@ def _env_enabled(name: str, default: bool = False) -> bool:
     return str(raw).strip().lower() in ("1", "true", "yes", "on")
 
 
-def _read_taptap_marker(path: str | None) -> bool:
-    if not path:
-        return False
-    try:
-        with open(os.path.expanduser(path), "r", encoding="utf-8") as f:
-            payload = json.load(f)
-    except (FileNotFoundError, TypeError, ValueError):
-        return False
-    except Exception as exc:
-        logger.warning("Cannot read GR00T nav taptap marker %s: %s", path, exc)
-        return False
-    return bool(payload.get("taptap_optimized", False))
-
-
-def resolve_taptap_limits(
-    backend_cfg: Any,
-    runtime_profile: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Resolve gait guards enabled only by the taptap wrapper."""
-    profile_file = _profile_path(backend_cfg)
+def resolve_adaptive_recovery(runtime_profile: dict[str, Any] | None = None) -> bool:
     runtime_profile = runtime_profile or {}
-
-    def value(key: str, default: Any) -> Any:
-        return runtime_profile.get(key, config_get(backend_cfg, key, default))
-
-    enabled = (
-        _env_enabled("GROOT_NAV_TAPTAP_LIMITS", False)
-        or _read_taptap_marker(profile_file)
+    return (
+        _env_enabled("GROOT_TAPTAP_ADAPTIVE", False)
+        or bool(runtime_profile.get("taptap_recovery", False))
     )
-    values = {
-        "enabled": enabled,
-        "lat_cruise": float(value("lat_cruise", 0.25)),
-        "lat_max": float(value("lat_max", 0.30)),
-        "yaw_cruise": float(value("yaw_cruise", 0.40)),
-        "yaw_max": float(value("yaw_max", 0.60)),
-        "linear_slew_rate": 0.0,
-        "yaw_slew_rate": 0.0,
-    }
-    if enabled:
-        values["lat_cruise"] = min(values["lat_cruise"], 0.20)
-        values["lat_max"] = min(values["lat_max"], 0.20)
-        values["yaw_cruise"] = min(values["yaw_cruise"], 0.40)
-        values["yaw_max"] = min(values["yaw_max"], 0.40)
-        values["linear_slew_rate"] = max(
-            0.0, float(config_get(backend_cfg, "taptap_linear_slew_rate", 0.80))
-        )
-        values["yaw_slew_rate"] = max(
-            0.0, float(config_get(backend_cfg, "taptap_yaw_slew_rate", 1.20))
-        )
-    return values
 
 
 class GrootHttpDiscreteBackend:
@@ -155,7 +111,7 @@ class GrootHttpDiscreteBackend:
         def runtime_value(key: str, default: Any) -> Any:
             return runtime_profile.get(key, config_get(backend_cfg, key, default))
 
-        taptap_limits = resolve_taptap_limits(backend_cfg, runtime_profile)
+        adaptive_recovery = resolve_adaptive_recovery(runtime_profile)
         self._continuous_velocity_enabled = bool(config_get(backend_cfg, "continuous_velocity_enable", True))
         self._continuous_command_interval = max(
             0.02,
@@ -174,8 +130,8 @@ class GrootHttpDiscreteBackend:
         self._last_continuous_send_time = 0.0
         self._continuous_applied_command = (0.0, 0.0, 0.0)
         self._continuous_applied_time = None
-        self._continuous_linear_slew_rate = taptap_limits["linear_slew_rate"]
-        self._continuous_yaw_slew_rate = taptap_limits["yaw_slew_rate"]
+        self._continuous_linear_slew_rate = 0.0
+        self._continuous_yaw_slew_rate = 0.0
 
         if not self.enabled:
             return
@@ -221,7 +177,7 @@ class GrootHttpDiscreteBackend:
                 return response.json()
 
         stop_hold_s = float(config_get(backend_cfg, "stop_hold_s", 0.4))
-        if taptap_limits["enabled"]:
+        if adaptive_recovery:
             stop_hold_s = max(
                 stop_hold_s,
                 float(config_get(backend_cfg, "taptap_stop_hold_s", 2.20)),
@@ -230,12 +186,12 @@ class GrootHttpDiscreteBackend:
         mover_kwargs = {
             "fwd_cruise": float(config_get(backend_cfg, "fwd_cruise", 0.40)),
             "back_cruise": float(config_get(backend_cfg, "back_cruise", 0.20)),
-            "lat_cruise": taptap_limits["lat_cruise"],
-            "yaw_cruise": taptap_limits["yaw_cruise"],
+            "lat_cruise": float(config_get(backend_cfg, "lat_cruise", 0.25)),
+            "yaw_cruise": float(config_get(backend_cfg, "yaw_cruise", 0.40)),
             "fwd_max": float(runtime_value("fwd_max", 0.50)),
             "back_max": float(runtime_value("back_max", 0.20)),
-            "lat_max": taptap_limits["lat_max"],
-            "yaw_max": taptap_limits["yaw_max"],
+            "lat_max": float(runtime_value("lat_max", 0.30)),
+            "yaw_max": float(runtime_value("yaw_max", 0.60)),
             "v_floor": v_floor,
             "w_floor": w_floor,
             "min_duration": min_duration,
@@ -255,7 +211,7 @@ class GrootHttpDiscreteBackend:
             "Using GR00T HTTP discrete motion backend at %s (profile=%s, "
             "min_duration=%.2f, min_distance=%.2f, v_floor=%.2f, "
             "warmup=%.2fs@%.2fm/s, stand_height=%.2fm, runtime=%s, "
-            "taptap_limits=%s, slew=%.2f/%.2f)",
+            "adaptive_recovery=%s, slew=%.2f/%.2f)",
             ipc_url,
             motion_profile,
             min_duration,
@@ -265,7 +221,7 @@ class GrootHttpDiscreteBackend:
             warmup_speed,
             mover_kwargs["stand_height"],
             runtime_profile_file,
-            taptap_limits["enabled"],
+            adaptive_recovery,
             self._continuous_linear_slew_rate,
             self._continuous_yaw_slew_rate,
         )

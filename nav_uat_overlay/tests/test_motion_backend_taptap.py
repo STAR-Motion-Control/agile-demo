@@ -14,7 +14,7 @@ motion_backend = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = motion_backend
 SPEC.loader.exec_module(motion_backend)
 GrootHttpDiscreteBackend = motion_backend.GrootHttpDiscreteBackend
-resolve_taptap_limits = motion_backend.resolve_taptap_limits
+resolve_adaptive_recovery = motion_backend.resolve_adaptive_recovery
 
 
 class FakeMover:
@@ -57,46 +57,31 @@ def make_backend(linear_rate, yaw_rate):
 
 
 class TaptapBackendTest(unittest.TestCase):
-    def test_limits_are_enabled_only_by_wrapper_environment(self):
-        cfg = {"lat_max": 0.40, "yaw_max": 0.60}
+    def test_recovery_is_enabled_only_by_wrapper_environment(self):
         with mock.patch.dict(os.environ, {}, clear=True):
-            standard = resolve_taptap_limits(cfg)
-        with mock.patch.dict(os.environ, {"GROOT_NAV_TAPTAP_LIMITS": "1"}, clear=True):
-            taptap = resolve_taptap_limits(cfg)
-        self.assertEqual(standard["linear_slew_rate"], 0.0)
-        self.assertEqual(standard["yaw_slew_rate"], 0.0)
-        self.assertEqual(taptap["lat_max"], 0.20)
-        self.assertEqual(taptap["yaw_max"], 0.40)
-        self.assertEqual(taptap["linear_slew_rate"], 0.80)
-        self.assertEqual(taptap["yaw_slew_rate"], 1.20)
+            self.assertFalse(resolve_adaptive_recovery())
+        with mock.patch.dict(os.environ, {"GROOT_TAPTAP_ADAPTIVE": "1"}, clear=True):
+            self.assertTrue(resolve_adaptive_recovery())
 
     def test_taptap_marker_survives_a_separate_navigation_shell(self):
-        cfg = {"lat_max": 0.40, "yaw_max": 0.60}
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as marker:
-            json.dump({"taptap_optimized": True}, marker)
+            json.dump({"taptap_recovery": True}, marker)
             marker.flush()
             with mock.patch.dict(
                 os.environ,
                 {"GROOT_NAV_MOTION_PROFILE_FILE": marker.name},
                 clear=True,
             ):
-                resolved = resolve_taptap_limits(cfg)
-        self.assertTrue(resolved["enabled"])
-        self.assertEqual(resolved["linear_slew_rate"], 0.80)
+                payload = motion_backend._read_profile_payload(marker.name)
+                resolved = resolve_adaptive_recovery(payload)
+        self.assertTrue(resolved)
 
-    def test_taptap_continuous_command_is_slew_limited(self):
-        backend = make_backend(0.80, 1.20)
-        with mock.patch.object(motion_backend.time, "monotonic", side_effect=[10.0, 10.1]):
-            self.assertTrue(backend.publish_velocity(0.40, 0.20, 0.40)[0])
+    def test_taptap_continuous_command_is_not_slew_limited(self):
+        backend = make_backend(0.0, 0.0)
+        with mock.patch.object(motion_backend.time, "monotonic", return_value=10.0):
             self.assertTrue(backend.publish_velocity(0.40, 0.20, 0.40)[0])
         first = backend._mover.calls[0][1]
-        second = backend._mover.calls[1][1]
-        self.assertAlmostEqual(first["vx"], 0.08)
-        self.assertAlmostEqual(first["vy"], 0.08)
-        self.assertAlmostEqual(first["wz"], 0.12)
-        self.assertAlmostEqual(second["vx"], 0.16)
-        self.assertAlmostEqual(second["vy"], 0.16)
-        self.assertAlmostEqual(second["wz"], 0.24)
+        self.assertEqual((first["vx"], first["vy"], first["wz"]), (0.40, 0.20, 0.40))
 
     def test_standard_path_applies_target_immediately(self):
         backend = make_backend(0.0, 0.0)

@@ -81,18 +81,11 @@ def resolve_motion_limits(
     fwd_max: float,
     lat_max: float,
     yaw_max: float,
-    *,
-    taptap: bool,
-    taptap_lat_max: float = 0.20,
-    taptap_yaw_max: float = 0.40,
 ) -> tuple[float, float, float]:
-    """Apply gait-safe limits only for the explicit taptap launch path."""
+    """Apply the same configured limits for standard and taptap launch paths."""
     fwd = min(float(fwd_max), FWD_VX_HARD)
     lat = max(0.0, float(lat_max))
     yaw = max(0.0, float(yaw_max))
-    if taptap:
-        lat = min(lat, max(0.0, float(taptap_lat_max)))
-        yaw = min(yaw, max(0.0, float(taptap_yaw_max)))
     return fwd, lat, yaw
 
 
@@ -427,10 +420,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="自适应回正前后对称踏步速度 m/s")
     p.add_argument("--taptap-adaptive-s", type=float, default=1.60,
                    help="自适应回正持续时间 s")
-    p.add_argument("--taptap-lat-max", type=float, default=0.20,
-                   help="taptap 路径横移上限 m/s; 标准路径不生效")
-    p.add_argument("--taptap-yaw-max", type=float, default=0.40,
-                   help="taptap 路径转向上限 rad/s; 标准路径不生效")
     p.add_argument("--safety-trip-ticks", type=int, default=3,
                    help="关节安全违规需连续 N 帧(50Hz)才触发停机。GR00T 原版单帧"
                         "sys.exit — 7-07 实测后退落地冲击在下垂手臂激起单帧肘部 dq"
@@ -554,9 +543,6 @@ def main() -> None:
         args.fwd_max,
         args.lat_max,
         args.yaw_max,
-        taptap=bool(args.taptap),
-        taptap_lat_max=args.taptap_lat_max,
-        taptap_yaw_max=args.taptap_yaw_max,
     )
 
     # 安全监视防抖: env_type 改 "sim" 让 handle_violations 返回 shutdown_required

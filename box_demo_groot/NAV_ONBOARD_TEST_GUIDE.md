@@ -100,7 +100,9 @@ cd ~/zihou/box_demo_1
 bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 ```
 
-两种 profile 都保留线性运动前的 warm-up。`keyboard` 只关闭 `min_duration/min_distance` 对导航距离/角度的改写，使 `/nav/forward_cmd`、`/nav/rotate_cmd` 和 `/planned_action` 在主运动段使用 `0.40/0.20/0.25/0.40` 这组速度。
+两种 profile 都继承启动脚本的 warm-up 配置，当前默认关闭。`keyboard` 只关闭
+`min_duration/min_distance` 对导航距离/角度的改写，使 `/nav/forward_cmd`、
+`/nav/rotate_cmd` 和 `/planned_action` 在主运动段使用 `0.40/0.20/0.25/0.40` 这组巡航速度。
 
 这个脚本只启动：
 
@@ -126,17 +128,21 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 - 手动键盘验底座时，不要发 `/nav/relative_cmd` 或 `/nav/text_nav`。
 - 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r`；现场只保留 `space` 和 `o` 作为人工安全入口。
 
-ROS 导航信号和 HTTP bridge 使用同一组速度上限：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`，统一站高 `0.74 m`。实际执行 profile 由 `start_g1_onboard_nav.sh --nav-motion-profile` 决定：
+ROS 导航信号和 HTTP bridge 使用同一组巡航速度：前进 `0.40 m/s`、后退
+`0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`。adapter 上限为
+`0.50/0.20/0.30/0.60`，统一站高 `0.76 m`。实际执行 profile 由
+`start_g1_onboard_nav.sh --nav-motion-profile` 决定：
 
-- `precise`：默认。保留 `min_duration=1.0`、`min_distance=0.08`、`v_floor=0.10`，适合可靠小步，但主运动速度可能低于键盘速度。
+- `precise`：默认。保留 `min_duration=1.5`、`min_distance=0.08`、`v_floor=0.12`，适合可靠小步，但主运动速度可能低于键盘速度。
 - `keyboard`：使用键盘同样巡航速度，关闭 `min_duration/min_distance`，适合对比键盘和导航姿态。
 
-两种模式都保留 warm-up。profile 会写入 `/tmp/groot_nav_motion_profile.json`，`nav_uat` 的 `motion_backend.py` 会在启动时读取。
+两种模式都使用同一个 warm-up 开关，默认关闭。profile 会写入
+`/tmp/groot_nav_motion_profile.json`，`nav_uat` 的 `motion_backend.py` 会在启动时读取。
 
 ### 4.1 自适应踏步回正测试版
 
 普通 `start_g1_onboard_nav.sh` 保留当前稳定逻辑。只有现场人员显式运行下面的 wrapper，
-才启用优化后的横移/转向限制和自适应踏步回正：
+才启用自适应踏步回正：
 
 ```bash
 cd ~/zihou/box_demo_1
@@ -157,6 +163,8 @@ IPC 会持续发送带 `allow_recovery=true` 的零速命令；adapter 防抖 `0
 键盘和导航使用同一个 IPC 判据。键盘 `space`、导航动作自然结束会允许检查；键盘 `o`、HTTP
 `/damp`、人工 `/stop` 默认不允许检查。`_taptap` wrapper 会把 mover 的停止保持时间延长到
 `2.20 s`，确保检查与回正期间命令不过期。
+这只是回正协议的同步等待，不改变高度、巡航速度、速度上限、warm-up、profile
+或连续指令的响应方式。
 
 5080 MuJoCo A/B 验证结果：前进停止后的前后脚偏差 `10.9 cm -> 7.6 cm`，转向
 `8.2 cm -> 7.2 cm`；后退和横移没有误触发，全部测试未跌倒。该结果只证明控制逻辑和当前模型下
@@ -195,14 +203,14 @@ motion_backend:
   box_demo_module_path: /home/unitree/zihou/box_demo_1
   motion_profile: precise
   profile_file: /tmp/groot_nav_motion_profile.json
-  stand_height: 0.74
+  stand_height: 0.76
   fwd_cruise: 0.40
   back_cruise: 0.20
   lat_cruise: 0.25
   yaw_cruise: 0.40
-  min_duration: 1.0
+  min_duration: 1.5
   min_distance: 0.08
-  v_floor: 0.10
+  v_floor: 0.12
   w_floor: 0.10
 ```
 

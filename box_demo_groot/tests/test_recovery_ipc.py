@@ -10,7 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import agile_http_ipc_server as server
-from groot_wbc_boxdemo_adapter import read_external_command
+from groot_wbc_boxdemo_adapter import read_external_command, resolve_motion_limits
 
 
 def setup_server(path: Path):
@@ -21,6 +21,10 @@ def setup_server(path: Path):
 
 def read(path: Path):
     return json.loads(path.read_text())
+
+
+def test_taptap_uses_standard_motion_limits():
+    assert resolve_motion_limits(0.50, 0.30, 0.60) == (0.50, 0.30, 0.60)
 
 
 def test_normal_completion_allows_recovery():
