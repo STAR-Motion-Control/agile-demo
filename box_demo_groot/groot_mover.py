@@ -68,14 +68,33 @@ import time
 from dataclasses import dataclass
 
 CMD_FILE = "/tmp/robojudo_ext_cmd.json"
+RUNTIME_CONFIG_FILE = os.environ.get(
+    "GROOT_BOX_RUNTIME_CONFIG", "/tmp/groot_box_runtime.json"
+)
 
-# Absolute pelvis-height command (meters). Nominal 0.74 matches the adapter
-# (DEFAULT_BASE_HEIGHT) / keyboard / bundled controller, gives ~2cm margin above
-# the 0.72 walk-floor guard, and walks better than 0.72 (mujoco: 0.74->13cm vs
-# 0.72->10.6cm for the same command).
-STAND_HEIGHT = 0.74
+
+def _runtime_float(env_name: str, key: str, default: float) -> float:
+    """Read a finite numeric setting with env > launcher runtime file > default."""
+    raw = os.environ.get(env_name)
+    if raw is None:
+        try:
+            with open(RUNTIME_CONFIG_FILE, "r", encoding="utf-8") as stream:
+                payload = json.load(stream)
+            raw = payload.get(key) if isinstance(payload, dict) else None
+        except (FileNotFoundError, OSError, TypeError, ValueError, json.JSONDecodeError):
+            raw = None
+    try:
+        value = float(raw) if raw is not None else float(default)
+    except (TypeError, ValueError):
+        value = float(default)
+    return value if math.isfinite(value) else float(default)
+
+# Absolute pelvis-height command (meters). Default 0.76 was validated with the
+# same DWBC Balance/Walk artifacts on 4090-lab. GROOT_STAND_HEIGHT keeps a
+# separately launched box_demo aligned with start_g1_onboard.sh --stand-height.
+STAND_HEIGHT = float(os.environ.get("GROOT_STAND_HEIGHT", "0.76"))
 MIN_HEIGHT = 0.40
-MAX_HEIGHT = 0.74
+MAX_HEIGHT = 0.80
 
 # GR00T-WBC Balance<->Walk switch (raw physical norm). Below this -> no stepping.
 WALK_THRESHOLD = 0.05
@@ -118,8 +137,9 @@ MIN_DISTANCE = 0.08  # m
 # establishing the gait deterministically so the measured move rides an
 # already-walking base instead of a swaying stand. Adds ~warmup_speed*warmup_time
 # of travel (so every move is a reliable ~10 cm+ step). ON by default.
-WARMUP_SPEED = 0.15  # m/s
-WARMUP_TIME = 0.6    # s
+WARMUP_SPEED = _runtime_float("GROOT_WARMUP_SPEED", "warmup_speed", 0.15)  # m/s
+# 0.76m 真机路径默认关闭；start_g1_onboard.sh --warmup on 写运行配置恢复 0.6s。
+WARMUP_TIME = max(0.0, _runtime_float("GROOT_WARMUP_TIME", "warmup_time", 0.0))  # s
 # settle guard: hold Balance this long before a move. COUNTERINTUITIVELY this can
 # HURT: residual standing sway is ~periodic, so a FIXED settle delay just shifts
 # the phase and can land ON a bad phase (sim2sim: settle=0.5 is worse than 0.0 in
@@ -209,7 +229,8 @@ def solve_yaw(angle_rad: float, cruise: float, w_floor: float,
 def write_command(cmd_file: str, fsm: str | None, forward: float = 0.0,
                   lateral: float = 0.0, yaw: float = 0.0,
                   height: float | None = None, duration: float | None = None,
-                  estop: bool = False, limp: bool = False) -> None:
+                  estop: bool = False, limp: bool = False,
+                  allow_recovery: bool = False) -> None:
     """Atomically write the GR00T IPC command with units='agile' (physical)."""
     cmd: dict = {
         "fsm": fsm,
@@ -218,6 +239,7 @@ def write_command(cmd_file: str, fsm: str | None, forward: float = 0.0,
         "units": "agile",
         "timestamp": time.time(),
         "source": "groot_mover",
+        "allow_recovery": bool(allow_recovery),
     }
     if height is not None:
         cmd["height"] = float(_clamp(height, MIN_HEIGHT, MAX_HEIGHT))
@@ -285,7 +307,8 @@ class GrootMover:
         self.auto_raise_for_walk = auto_raise_for_walk
         self.dist_gain = max(1.0, float(dist_gain))
         self.refresh_hz = refresh_hz
-        self.stop_hold_s = stop_hold_s
+        adaptive_wait = 2.20 if os.environ.get("GROOT_TAPTAP_ADAPTIVE") == "1" else 0.0
+        self.stop_hold_s = max(float(stop_hold_s), adaptive_wait)
         self.verbose = verbose
 
     # ----------------------------------------------------------------- helpers
@@ -305,7 +328,8 @@ class GrootMover:
         while time.time() < deadline:
             remaining = max(0.0, deadline - time.time())
             write_command(self.cmd_file, "RL_FULL", forward, lateral, yaw,
-                          height=self._height, duration=remaining)
+                          height=self._height, duration=remaining,
+                          allow_recovery=True)
             time.sleep(period)
 
     def _settle(self) -> None:
@@ -314,7 +338,7 @@ class GrootMover:
         end = time.time() + self.stop_hold_s
         while time.time() < end:
             write_command(self.cmd_file, "RL_FULL", 0.0, 0.0, 0.0,
-                          height=self._height)
+                          height=self._height, allow_recovery=True)
             time.sleep(period)
 
     def _refresh_for(self, forward: float, lateral: float, yaw: float,
@@ -424,7 +448,8 @@ class GrootMover:
         return plan
 
     def stop(self) -> None:
-        write_command(self.cmd_file, "RL_FULL", height=self._height)
+        write_command(self.cmd_file, "RL_FULL", height=self._height,
+                      allow_recovery=False)
 
     def set_height(self, height: float) -> None:
         self._height = float(_clamp(height, MIN_HEIGHT, MAX_HEIGHT))

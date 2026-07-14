@@ -70,8 +70,10 @@ class RemoteMover(GrootMover):
         time.sleep(duration)
 
     def _settle(self) -> None:
-        self._get("/stop", height=self._height)
-        time.sleep(self.stop_hold_s)
+        deadline = time.monotonic() + self.stop_hold_s
+        while time.monotonic() < deadline:
+            self._get("/stop", height=self._height, allow_recovery=1)
+            time.sleep(min(0.10, max(0.0, deadline - time.monotonic())))
 
     def _refresh_for(self, forward: float, lateral: float, yaw: float,
                      duration: float) -> None:  # back-compat
@@ -85,7 +87,7 @@ class RemoteMover(GrootMover):
         self._log(f"RL_FULL ready (remote {self.ipc_url}).")
 
     def stop(self) -> None:
-        self._get("/stop", height=self._height)
+        self._get("/stop", height=self._height, allow_recovery=0)
 
     def set_height(self, height: float) -> None:
         self._height = float(_clamp(height, MIN_HEIGHT, MAX_HEIGHT))
@@ -110,5 +112,5 @@ class RemoteMover(GrootMover):
         self._log("LIMP (release stiffness).")
 
     def release(self) -> None:
-        self._get("/stop", height=self._height)
+        self._get("/stop", height=self._height, allow_recovery=0)
         self._log("stopped (remote; IPC file owned by the 5080).")

@@ -26,29 +26,41 @@ def _profile_alias(value: Any) -> str:
     return name
 
 
-def _read_profile_file(path: str | None) -> str | None:
+def _read_profile_payload(path: str | None) -> dict[str, Any]:
     if not path:
-        return None
+        return {}
     try:
         with open(os.path.expanduser(path), "r", encoding="utf-8") as f:
             payload = json.load(f)
     except FileNotFoundError:
-        return None
+        return {}
     except Exception as exc:
         logger.warning("Cannot read GR00T nav motion profile file %s: %s", path, exc)
-        return None
+        return {}
+    if not isinstance(payload, dict):
+        logger.warning("GR00T nav motion profile %s is not a JSON object", path)
+        return {}
+    return payload
+
+
+def _read_profile_file(path: str | None) -> str | None:
+    payload = _read_profile_payload(path)
     for key in ("motion_profile", "nav_motion_profile", "profile"):
         if key in payload:
             return str(payload[key])
     return None
 
 
-def resolve_motion_profile(backend_cfg: Any) -> str:
-    configured = config_get(backend_cfg, "motion_profile", "precise")
-    profile_file = os.environ.get(
+def _profile_path(backend_cfg: Any) -> str:
+    return os.environ.get(
         "GROOT_NAV_MOTION_PROFILE_FILE",
         str(config_get(backend_cfg, "profile_file", "/tmp/groot_nav_motion_profile.json")),
     )
+
+
+def resolve_motion_profile(backend_cfg: Any) -> str:
+    configured = config_get(backend_cfg, "motion_profile", "precise")
+    profile_file = _profile_path(backend_cfg)
     raw_profile = (
         os.environ.get("GROOT_NAV_MOTION_PROFILE")
         or _read_profile_file(profile_file)
@@ -82,22 +94,27 @@ def _read_taptap_marker(path: str | None) -> bool:
     return bool(payload.get("taptap_optimized", False))
 
 
-def resolve_taptap_limits(backend_cfg: Any) -> dict[str, Any]:
+def resolve_taptap_limits(
+    backend_cfg: Any,
+    runtime_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Resolve gait guards enabled only by the taptap wrapper."""
-    profile_file = os.environ.get(
-        "GROOT_NAV_MOTION_PROFILE_FILE",
-        str(config_get(backend_cfg, "profile_file", "/tmp/groot_nav_motion_profile.json")),
-    )
+    profile_file = _profile_path(backend_cfg)
+    runtime_profile = runtime_profile or {}
+
+    def value(key: str, default: Any) -> Any:
+        return runtime_profile.get(key, config_get(backend_cfg, key, default))
+
     enabled = (
         _env_enabled("GROOT_NAV_TAPTAP_LIMITS", False)
         or _read_taptap_marker(profile_file)
     )
     values = {
         "enabled": enabled,
-        "lat_cruise": float(config_get(backend_cfg, "lat_cruise", 0.25)),
-        "lat_max": float(config_get(backend_cfg, "lat_max", 0.40)),
-        "yaw_cruise": float(config_get(backend_cfg, "yaw_cruise", 0.40)),
-        "yaw_max": float(config_get(backend_cfg, "yaw_max", 0.60)),
+        "lat_cruise": float(value("lat_cruise", 0.25)),
+        "lat_max": float(value("lat_max", 0.30)),
+        "yaw_cruise": float(value("yaw_cruise", 0.40)),
+        "yaw_max": float(value("yaw_max", 0.60)),
         "linear_slew_rate": 0.0,
         "yaw_slew_rate": 0.0,
     }
@@ -132,7 +149,13 @@ class GrootHttpDiscreteBackend:
         self._mover = None
         self._initialized = False
         self._initialize_before_motion = bool(config_get(backend_cfg, "initialize_before_motion", True))
-        taptap_limits = resolve_taptap_limits(backend_cfg)
+        runtime_profile_file = _profile_path(backend_cfg)
+        runtime_profile = _read_profile_payload(runtime_profile_file)
+
+        def runtime_value(key: str, default: Any) -> Any:
+            return runtime_profile.get(key, config_get(backend_cfg, key, default))
+
+        taptap_limits = resolve_taptap_limits(backend_cfg, runtime_profile)
         self._continuous_velocity_enabled = bool(config_get(backend_cfg, "continuous_velocity_enable", True))
         self._continuous_command_interval = max(
             0.02,
@@ -163,20 +186,18 @@ class GrootHttpDiscreteBackend:
         ipc_url = str(config_get(backend_cfg, "ipc_url", "http://192.168.123.222:5001")).rstrip("/")
         timeout = float(config_get(backend_cfg, "http_timeout", 2.0))
         motion_profile = resolve_motion_profile(backend_cfg)
-        warmup_time = float(config_get(backend_cfg, "warmup_time", 0.6))
-        warmup_speed = float(config_get(backend_cfg, "warmup_speed", 0.15))
-        if warmup_time <= 0.0:
-            warmup_time = 0.6
+        warmup_time = max(0.0, float(runtime_value("warmup_time", 0.0)))
+        warmup_speed = float(runtime_value("warmup_speed", 0.15))
         if warmup_speed <= 0.0:
             warmup_speed = 0.15
         if motion_profile == "keyboard":
             min_duration = 0.0
             min_distance = 0.0
         else:
-            min_duration = float(config_get(backend_cfg, "min_duration", 1.0))
-            min_distance = float(config_get(backend_cfg, "min_distance", 0.08))
-        v_floor = float(config_get(backend_cfg, "v_floor", 0.10))
-        w_floor = float(config_get(backend_cfg, "w_floor", 0.10))
+            min_duration = float(runtime_value("min_duration", 1.5))
+            min_distance = float(runtime_value("min_distance", 0.08))
+        v_floor = float(runtime_value("v_floor", 0.12))
+        w_floor = float(runtime_value("w_floor", 0.10))
 
         if module_path and module_path not in sys.path:
             sys.path.insert(0, module_path)
@@ -199,13 +220,20 @@ class GrootHttpDiscreteBackend:
                 response.raise_for_status()
                 return response.json()
 
+        stop_hold_s = float(config_get(backend_cfg, "stop_hold_s", 0.4))
+        if taptap_limits["enabled"]:
+            stop_hold_s = max(
+                stop_hold_s,
+                float(config_get(backend_cfg, "taptap_stop_hold_s", 2.20)),
+            )
+
         mover_kwargs = {
             "fwd_cruise": float(config_get(backend_cfg, "fwd_cruise", 0.40)),
             "back_cruise": float(config_get(backend_cfg, "back_cruise", 0.20)),
             "lat_cruise": taptap_limits["lat_cruise"],
             "yaw_cruise": taptap_limits["yaw_cruise"],
-            "fwd_max": float(config_get(backend_cfg, "fwd_max", 0.50)),
-            "back_max": float(config_get(backend_cfg, "back_max", 0.20)),
+            "fwd_max": float(runtime_value("fwd_max", 0.50)),
+            "back_max": float(runtime_value("back_max", 0.20)),
             "lat_max": taptap_limits["lat_max"],
             "yaw_max": taptap_limits["yaw_max"],
             "v_floor": v_floor,
@@ -215,9 +243,9 @@ class GrootHttpDiscreteBackend:
             "warmup_time": warmup_time,
             "warmup_speed": warmup_speed,
             "settle_before_s": float(config_get(backend_cfg, "settle_before_s", 0.0)),
-            "stop_hold_s": float(config_get(backend_cfg, "stop_hold_s", 0.4)),
-            "stand_height": float(config_get(backend_cfg, "stand_height", 0.74)),
-            "walk_min_height": float(config_get(backend_cfg, "walk_min_height", 0.72)),
+            "stop_hold_s": stop_hold_s,
+            "stand_height": float(runtime_value("stand_height", 0.76)),
+            "walk_min_height": float(runtime_value("walk_min_height", 0.72)),
             "auto_raise_for_walk": bool(config_get(backend_cfg, "auto_raise_for_walk", False)),
             "dist_gain": float(config_get(backend_cfg, "dist_gain", 1.0)),
             "verbose": bool(config_get(backend_cfg, "verbose", True)),
@@ -226,7 +254,8 @@ class GrootHttpDiscreteBackend:
         self.log.info(
             "Using GR00T HTTP discrete motion backend at %s (profile=%s, "
             "min_duration=%.2f, min_distance=%.2f, v_floor=%.2f, "
-            "warmup=%.2fs@%.2fm/s, taptap_limits=%s, slew=%.2f/%.2f)",
+            "warmup=%.2fs@%.2fm/s, stand_height=%.2fm, runtime=%s, "
+            "taptap_limits=%s, slew=%.2f/%.2f)",
             ipc_url,
             motion_profile,
             min_duration,
@@ -234,6 +263,8 @@ class GrootHttpDiscreteBackend:
             v_floor,
             warmup_time,
             warmup_speed,
+            mover_kwargs["stand_height"],
+            runtime_profile_file,
             taptap_limits["enabled"],
             self._continuous_linear_slew_rate,
             self._continuous_yaw_slew_rate,

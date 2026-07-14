@@ -133,6 +133,45 @@ ROS 导航信号和 HTTP bridge 使用同一组速度上限：前进 `0.40 m/s`�
 
 两种模式都保留 warm-up。profile 会写入 `/tmp/groot_nav_motion_profile.json`，`nav_uat` 的 `motion_backend.py` 会在启动时读取。
 
+### 4.1 自适应踏步回正测试版
+
+普通 `start_g1_onboard_nav.sh` 保留当前稳定逻辑。只有现场人员显式运行下面的 wrapper，
+才启用优化后的横移/转向限制和自适应踏步回正：
+
+```bash
+cd ~/zihou/box_demo_1
+bash start_g1_onboard_nav_taptap.sh
+```
+
+adapter 启动后先在稳定零速站立阶段标定足间距和左右脚有符号前后关系。一次有效运动正常结束后，
+IPC 会持续发送带 `allow_recovery=true` 的零速命令；adapter 防抖 `0.35 s`，再采样
+`0.12 s`。只有满足以下任一条件才执行 `1.60 s`、`0.08 m/s` 的前后对称踏步：
+
+- 足间距比启动标定值窄超过 `0.035 m`；
+- 左右脚前后关系相对启动标定值偏差超过 `0.08 m`。
+
+恢复第一步的方向由脚差方向决定，随后每 `0.40 s` 反向，以减少净位移。恢复期间如果收到下一条
+普通运动命令，adapter 会暂存该命令，回正完成后再执行；`DAMP`、急停、命令超时或退出会立即取消
+回正，不会把安全停止解释成可恢复停止。
+
+键盘和导航使用同一个 IPC 判据。键盘 `space`、导航动作自然结束会允许检查；键盘 `o`、HTTP
+`/damp`、人工 `/stop` 默认不允许检查。`_taptap` wrapper 会把 mover 的停止保持时间延长到
+`2.20 s`，确保检查与回正期间命令不过期。
+
+5080 MuJoCo A/B 验证结果：前进停止后的前后脚偏差 `10.9 cm -> 7.6 cm`，转向
+`8.2 cm -> 7.2 cm`；后退和横移没有误触发，全部测试未跌倒。该结果只证明控制逻辑和当前模型下
+的改进趋势，首次真机仍须按第 6 节从小动作开始。
+
+调参入口均为 `_taptap.sh` 后追加的 adapter 参数：
+
+```bash
+bash start_g1_onboard_nav_taptap.sh \
+  --taptap-width-margin 0.035 \
+  --taptap-stagger-limit 0.08 \
+  --taptap-adaptive-speed 0.08 \
+  --taptap-adaptive-s 1.60
+```
+
 ## 5. 启动导航 ROS bridge
 
 另开终端：

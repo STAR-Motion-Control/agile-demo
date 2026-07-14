@@ -42,13 +42,15 @@ def clamp(v: float, lo: float, hi: float) -> float:
 
 
 def write_cmd(fsm: str, vx: float, vy: float, wz: float, height: float,
-              estop: bool = False):
+              min_height: float, max_height: float, estop: bool = False,
+              allow_recovery: bool = False):
     cmd = {
         "fsm": "DAMP" if estop else fsm,
         "velocity": {"forward": vx, "lateral": vy, "yaw": wz},
-        "height": clamp(height, MIN_HEIGHT, MAX_HEIGHT),
+        "height": clamp(height, min_height, max_height),
         "units": "agile",
         "timestamp": time.time(),
+        "allow_recovery": bool(allow_recovery),
     }
     if estop:
         cmd["estop"] = True
@@ -65,27 +67,39 @@ def key_ready(timeout: float) -> bool:
 
 def main():
     p = argparse.ArgumentParser(description="Keyboard IPC control for AGILE box_demo_2")
-    p.add_argument("--vx", type=float, default=0.20, help="W/S speed in m/s")
-    p.add_argument("--vy", type=float, default=0.12, help="A/D speed in m/s")
-    p.add_argument("--wz", type=float, default=0.15, help="Q/E yaw rate in rad/s")
+    p.add_argument("--vx", type=float, default=0.40, help="W/S speed in m/s")
+    p.add_argument("--vy", type=float, default=0.30, help="A/D speed in m/s")
+    p.add_argument("--wz", type=float, default=0.4, help="Q/E yaw rate in rad/s")
     p.add_argument("--height-step", type=float, default=0.02, help="Z/X height increment in m")
     p.add_argument("--pick-height", type=float, default=0.55, help="C key preset height in m")
+    p.add_argument("--stand-height", type=float, default=STAND_HEIGHT,
+                   help="initial height and R-key preset in m")
+    p.add_argument("--min-height", type=float, default=MIN_HEIGHT)
+    p.add_argument("--max-height", type=float, default=MAX_HEIGHT)
     p.add_argument("--refresh-hz", type=float, default=20.0)
     p.add_argument("--key-timeout", type=float, default=0.25, help="velocity expires after no key input")
     args = p.parse_args()
 
-    height = STAND_HEIGHT
+    if not args.min_height <= args.stand_height <= args.max_height:
+        p.error("--stand-height must be inside --min-height..--max-height")
+    height = clamp(args.stand_height, args.min_height, args.max_height)
     fsm = "RL_FULL"
     vx = vy = wz = 0.0
     last_motion_key = 0.0
     dirty = True
     dt = 1.0 / args.refresh_hz
+    adaptive_stop_hold_s = (
+        2.20 if os.environ.get("GROOT_TAPTAP_ADAPTIVE") == "1" else 0.0
+    )
+    recovery_keepalive_until = 0.0
 
     print("=" * 64)
     print("AGILE keyboard control -> /tmp/robojudo_ext_cmd.json")
     print("  w/s forward/back, a/d strafe, q/e yaw")
     print("  z/x height -/+ 2cm, c pick-height, r stand, space stop")
     print("  f RL_FULL, l RL_LOWER, o damping/e-stop, Ctrl+C exit")
+    print(f"  height: stand={args.stand_height:.2f}m "
+          f"range={args.min_height:.2f}..{args.max_height:.2f}m")
     print("=" * 64)
 
     old = termios.tcgetattr(sys.stdin)
@@ -99,34 +113,42 @@ def main():
                 if ch == "w":
                     vx, vy, wz = args.vx, 0.0, 0.0
                     last_motion_key = time.time()
+                    recovery_keepalive_until = 0.0
                 elif ch == "s":
                     vx, vy, wz = -args.vx, 0.0, 0.0
                     last_motion_key = time.time()
+                    recovery_keepalive_until = 0.0
                 elif ch == "a":
                     vx, vy, wz = 0.0, args.vy, 0.0
                     last_motion_key = time.time()
+                    recovery_keepalive_until = 0.0
                 elif ch == "d":
                     vx, vy, wz = 0.0, -args.vy, 0.0
                     last_motion_key = time.time()
+                    recovery_keepalive_until = 0.0
                 elif ch == "q":
                     vx, vy, wz = 0.0, 0.0, args.wz
                     last_motion_key = time.time()
+                    recovery_keepalive_until = 0.0
                 elif ch == "e":
                     vx, vy, wz = 0.0, 0.0, -args.wz
                     last_motion_key = time.time()
+                    recovery_keepalive_until = 0.0
                 elif ch == "z":
-                    height = clamp(height - args.height_step, MIN_HEIGHT, MAX_HEIGHT)
+                    height = clamp(height - args.height_step, args.min_height, args.max_height)
                     dirty = True
                 elif ch == "x":
-                    height = clamp(height + args.height_step, MIN_HEIGHT, MAX_HEIGHT)
+                    height = clamp(height + args.height_step, args.min_height, args.max_height)
                     dirty = True
                 elif ch == "c":
-                    height = clamp(args.pick_height, MIN_HEIGHT, MAX_HEIGHT)
+                    height = clamp(args.pick_height, args.min_height, args.max_height)
                     dirty = True
                 elif ch == "r":
-                    height = STAND_HEIGHT
+                    height = clamp(args.stand_height, args.min_height, args.max_height)
                     dirty = True
                 elif ch == " ":
+                    if vx != 0.0 or vy != 0.0 or wz != 0.0:
+                        recovery_keepalive_until = time.time() + adaptive_stop_hold_s
                     vx = vy = wz = 0.0
                     dirty = True
                 elif ch == "f":
@@ -137,17 +159,29 @@ def main():
                     vx = vy = wz = 0.0
                     dirty = True
                 elif ch == "o":
-                    write_cmd(fsm, 0.0, 0.0, 0.0, height, estop=True)
+                    fsm = "DAMP"
+                    vx = vy = wz = 0.0
+                    last_motion_key = 0.0
+                    recovery_keepalive_until = 0.0
+                    write_cmd(fsm, 0.0, 0.0, 0.0, height,
+                              args.min_height, args.max_height, estop=True)
                     print("\n[DAMP] e-stop request written")
                     continue
 
             motion_active = time.time() - last_motion_key <= args.key_timeout
             if not motion_active and (vx != 0.0 or vy != 0.0 or wz != 0.0):
                 vx = vy = wz = 0.0
+                recovery_keepalive_until = time.time() + adaptive_stop_hold_s
                 dirty = True
 
-            if motion_active or dirty:
-                write_cmd(fsm, vx, vy, wz, height)
+            recovery_keepalive = (
+                fsm == "RL_FULL" and time.time() < recovery_keepalive_until
+            )
+            if motion_active or dirty or recovery_keepalive:
+                write_cmd(
+                    fsm, vx, vy, wz, height, args.min_height, args.max_height,
+                    allow_recovery=(fsm == "RL_FULL"),
+                )
                 dirty = False
             print(
                 f"\rmode={fsm:8s} vx={vx:+.2f} vy={vy:+.2f} wz={wz:+.2f} height={height:.2f}m",
@@ -156,7 +190,10 @@ def main():
             )
     except KeyboardInterrupt:
         print("\nexit: stop velocity, keep current height")
-        write_cmd(fsm, 0.0, 0.0, 0.0, height)
+        write_cmd(
+            fsm, 0.0, 0.0, 0.0, height, args.min_height, args.max_height,
+            allow_recovery=False,
+        )
     finally:
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
 

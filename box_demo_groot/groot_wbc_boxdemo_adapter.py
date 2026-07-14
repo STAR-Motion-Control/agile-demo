@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from adaptive_taptap import AdaptiveTapTapController, StanceMetrics
+
 CMD_FILE = "/tmp/robojudo_ext_cmd.json"
 
 DEFAULT_BASE_HEIGHT = 0.74
@@ -62,6 +64,7 @@ class ExternalCommand:
     height: float
     fresh: bool
     estop: bool = False
+    allow_recovery: bool = False
 
 
 def clamp(value: float, lo: float, hi: float) -> float:
@@ -91,6 +94,21 @@ def resolve_motion_limits(
         lat = min(lat, max(0.0, float(taptap_lat_max)))
         yaw = min(yaw, max(0.0, float(taptap_yaw_max)))
     return fwd, lat, yaw
+
+
+def ensure_cv2_importable() -> None:
+    """Reuse Ubuntu's cv2 after conda packages, preserving conda precedence."""
+    try:
+        __import__("cv2")
+        return
+    except ModuleNotFoundError as exc:
+        if exc.name != "cv2":
+            raise
+
+    system_dist_packages = Path("/usr/lib/python3/dist-packages")
+    if system_dist_packages.is_dir() and str(system_dist_packages) not in sys.path:
+        sys.path.append(str(system_dist_packages))
+    __import__("cv2")
 
 
 def _yaw_from_quat(qw: float, qx: float, qy: float, qz: float) -> float:
@@ -181,6 +199,7 @@ def read_external_command(
         wz=wz,
         height=height,
         fresh=fresh,
+        allow_recovery=bool(raw.get("allow_recovery", False)),
     )
 
 
@@ -191,6 +210,7 @@ def import_groot_stack(repo: Path):
     if str(repo) not in sys.path:
         sys.path.insert(0, str(repo))
 
+    ensure_cv2_importable()
     from decoupled_wbc.control.envs.g1.g1_env import G1Env
     from decoupled_wbc.control.main.teleop.configs.configs import ControlLoopConfig
     from decoupled_wbc.control.policy.wbc_policy_factory import get_wbc_policy
@@ -343,6 +363,20 @@ def _latest_low_state(env):
         return None
 
 
+def measure_stance(robot_model, q) -> StanceMetrics:
+    """Measure ankle-center geometry in the pelvis yaw frame."""
+    robot_model.cache_forward_kinematics(q, auto_clip=False)
+    pelvis = robot_model.frame_placement("pelvis")
+    left = robot_model.frame_placement("left_ankle_roll_link")
+    right = robot_model.frame_placement("right_ankle_roll_link")
+    relative = pelvis.rotation.T @ (left.translation - right.translation)
+    return StanceMetrics(
+        width=abs(float(relative[1])),
+        stagger=float(relative[0]),
+        height_delta=abs(float(relative[2])),
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         description="GR00T-WBC rt/lowcmd_rl adapter for box_demo_2",
@@ -362,9 +396,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="停止回正踏步(参考宇树官方运控): 每段运动结束后原地踏步"
                         " settle 秒恢复标准站姿+高度回站高, 段间清零开环漂移。"
                         "测试版入口 start_g1_onboard_taptap.sh / _nav_taptap.sh")
-    p.add_argument("--taptap-recovery", default="legacy", choices=("legacy", "off"),
-                   help="legacy=保留旧的停止后方波踏步实验; off=仅使用taptap限幅，"
-                        "不注入自主恢复动作(优化版导航入口使用)")
+    p.add_argument("--taptap-recovery", default="legacy", choices=("legacy", "adaptive", "off"),
+                   help="adaptive=仅在足间距过窄/前后错位过大时回正; "
+                        "legacy=每次正常停止后固定回正; off=仅使用taptap限幅")
     p.add_argument("--taptap-settle-s", type=float, default=1.2,
                    help="踏步回正窗口时长 s")
     p.add_argument("--taptap-mode", default="wz", choices=("wz", "vx", "vx_taper"),
@@ -379,6 +413,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="停止多久后才开始回正(盖过键盘 auto-repeat 空窗)")
     p.add_argument("--taptap-min-motion-s", type=float, default=0.4,
                    help="运动短于此时长不触发回正(过滤指令毛刺)")
+    p.add_argument("--taptap-reference-width", type=float, default=0.24,
+                   help="自适应回正的初始标准足间距 m; 启动稳定站立后自动标定")
+    p.add_argument("--taptap-width-margin", type=float, default=0.035,
+                   help="实际足间距比标准值窄超过该值时触发回正 m")
+    p.add_argument("--taptap-stagger-limit", type=float, default=0.08,
+                   help="双脚前后错位触发阈值 m")
+    p.add_argument("--taptap-height-delta-max", type=float, default=0.03,
+                   help="双脚高度差超过该值时仍视为摆动期, 暂不判断 m")
+    p.add_argument("--taptap-confirm-s", type=float, default=0.12,
+                   help="停止防抖后用于足姿确认的采样窗口 s")
+    p.add_argument("--taptap-adaptive-speed", type=float, default=0.08,
+                   help="自适应回正前后对称踏步速度 m/s")
+    p.add_argument("--taptap-adaptive-s", type=float, default=1.60,
+                   help="自适应回正持续时间 s")
     p.add_argument("--taptap-lat-max", type=float, default=0.20,
                    help="taptap 路径横移上限 m/s; 标准路径不生效")
     p.add_argument("--taptap-yaw-max", type=float, default=0.40,
@@ -548,6 +596,19 @@ def main() -> None:
     tap_until = 0.0
     tap_t0 = 0.0
     tap_start_sign = 1.0
+    adaptive_taptap = AdaptiveTapTapController(
+        reference_width=args.taptap_reference_width,
+        width_margin=args.taptap_width_margin,
+        stagger_limit=args.taptap_stagger_limit,
+        max_height_delta=args.taptap_height_delta_max,
+        debounce_s=args.taptap_debounce_s,
+        confirm_s=args.taptap_confirm_s,
+        min_motion_s=args.taptap_min_motion_s,
+        recovery_s=args.taptap_adaptive_s,
+        recovery_speed=args.taptap_adaptive_speed,
+        phase_s=args.taptap_period_s,
+    )
+    last_stance = None
 
     dt = 1.0 / float(args.hz)
     height_cmd = clamp(float(args.stand_height), args.min_height, args.max_height)
@@ -577,8 +638,13 @@ def main() -> None:
         print(f"  taptap:      ON — {args.taptap_mode} 停止回正踏步 "
               f"{args.taptap_settle_s:.1f}s ±{tap_amp:.2f} "
               f"周期{args.taptap_period_s:.1f}s (防抖{args.taptap_debounce_s:.2f}s)")
+    elif args.taptap and args.taptap_recovery == "adaptive":
+        print(f"  taptap:      adaptive vx=±{args.taptap_adaptive_speed:.2f}m/s "
+              f"for {args.taptap_adaptive_s:.2f}s; "
+              f"width<{args.taptap_reference_width:.3f}-{args.taptap_width_margin:.3f}m "
+              f"or stagger>{args.taptap_stagger_limit:.3f}m")
     elif args.taptap:
-        print("  taptap:      limits ON; legacy stop-recovery OFF")
+        print("  taptap:      limits ON; recovery OFF")
     print(f"  height:      {args.min_height:.2f}..{args.max_height:.2f}m, rate={args.height_rate:.2f}m/s")
     if float(args.walk_height_floor) > 0.0:
         print(f"  walk-floor:  {args.walk_height_floor:.2f}m (低位拒走/恢复中warmup拦速度)")
@@ -684,6 +750,22 @@ def main() -> None:
                             tap_zero_since = None
                             tap_last_motion_dur = 0.0         # 完成才消费; 打断保留补做
                             print("[TAPTAP] 回正完成")
+            elif args.taptap and args.taptap_recovery == "adaptive":
+                cmd, tap_active, tap_event = adaptive_taptap.update(
+                    time.monotonic(), cmd, last_stance
+                )
+                if tap_event == "started":
+                    print(f"[TAPTAP] 站姿异常, 开始自适应回正 "
+                          f"(width={last_stance.width:.3f}m "
+                          f"stagger={last_stance.stagger:.3f}m "
+                          f"reference={adaptive_taptap.reference_width:.3f}m)")
+                elif tap_event == "healthy":
+                    print(f"[TAPTAP] 站姿正常, 跳过回正 "
+                          f"(reference={adaptive_taptap.reference_width:.3f}m)")
+                elif tap_event == "completed":
+                    print("[TAPTAP] 自适应回正完成")
+                elif tap_event == "cancelled":
+                    print("[TAPTAP] 安全/状态命令中断回正")
 
             height_cmd = approach(
                 height_cmd,
@@ -709,6 +791,15 @@ def main() -> None:
                 continue
 
             low_state = _latest_low_state(env)
+
+            try:
+                last_stance = measure_stance(robot_model, obs["q"])
+            except Exception as exc:
+                last_stance = None
+                now = time.monotonic()
+                if now - last_print >= float(args.print_every_s):
+                    print(f"[WARN] cannot measure foot stance: {exc}")
+                    last_print = now
 
             if lean_state > 1e-4 and waist_dof is not None:
                 # 观测补偿: 策略看到的腰pitch = 实测值 - 偏置(即它自己命令的角度)

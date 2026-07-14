@@ -23,9 +23,9 @@ from urllib.parse import parse_qs, urlparse
 
 LEGACY_CMD_FILE = "/tmp/robojudo_ext_cmd.json"
 DEFAULT_STATE_DIR = "/tmp/agile_sim2sim"
-STAND_HEIGHT = 0.74
+STAND_HEIGHT = 0.76
 MIN_HEIGHT = 0.40
-MAX_HEIGHT = 0.74
+MAX_HEIGHT = 0.80
 FWD_SPEED = 0.40
 BACK_SPEED = 0.20
 LAT_SPEED = 0.25
@@ -69,6 +69,7 @@ def write_cmd(
     height: float = STAND_HEIGHT,
     *,
     estop: bool = False,
+    allow_recovery: bool = False,
 ) -> dict:
     t = time.time()
     fsm_out = "DAMP" if estop else fsm
@@ -80,6 +81,7 @@ def write_cmd(
             "units": "agile",
             "timestamp": t,
             "source": "http_ipc",
+            "allow_recovery": bool(allow_recovery),
         }
         if estop:
             payload["estop"] = True
@@ -94,6 +96,7 @@ def write_cmd(
         "height": clamp(float(height), MIN_HEIGHT, MAX_HEIGHT),
         "timestamp": t,
         "source": "http_ipc",
+        "allow_recovery": bool(allow_recovery),
     }
     if estop:
         payload["estop"] = True
@@ -122,6 +125,11 @@ def get_float(qs: dict[str, list[str]], key: str, default: float) -> float:
 
 def get_str(qs: dict[str, list[str]], key: str, default: str) -> str:
     return str(qs.get(key, [default])[0])
+
+
+def get_bool(qs: dict[str, list[str]], key: str, default: bool = False) -> bool:
+    raw = str(qs.get(key, ["1" if default else "0"])[0]).strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def cancel_motion() -> None:
@@ -153,9 +161,10 @@ def start_motion(
         deadline = time.time() + duration
         try:
             while time.time() < deadline and not stop_event.is_set():
-                write_cmd(fsm, vx, vy, wz, height)
+                write_cmd(fsm, vx, vy, wz, height, allow_recovery=True)
                 time.sleep(refresh_s)
-            write_cmd(fsm, 0.0, 0.0, 0.0, height)
+            if not stop_event.is_set():
+                write_cmd(fsm, 0.0, 0.0, 0.0, height, allow_recovery=True)
         finally:
             global _motion_stop
             with _motion_lock:
@@ -203,7 +212,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(read_status())
             elif path == "/stop":
                 cancel_motion()
-                self._json(write_cmd(fsm, 0.0, 0.0, 0.0, height))
+                self._json(write_cmd(
+                    fsm, 0.0, 0.0, 0.0, height,
+                    allow_recovery=get_bool(qs, "allow_recovery", False),
+                ))
             elif path == "/damp":
                 cancel_motion()
                 self._json(write_cmd("DAMP", 0.0, 0.0, 0.0, height, estop=True))
@@ -223,7 +235,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(start_motion(vx, vy, wz, duration, height, fsm, refresh_s))
                 else:
                     cancel_motion()
-                    self._json(write_cmd(fsm, vx, vy, wz, height))
+                    self._json(write_cmd(
+                        fsm, vx, vy, wz, height,
+                        allow_recovery=get_bool(qs, "allow_recovery", True),
+                    ))
             elif path == "/forward":
                 distance = get_float(qs, "distance", 0.08)
                 default_speed = FWD_SPEED if distance >= 0.0 else BACK_SPEED
@@ -256,13 +271,22 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     global _backend, _state_dir, _legacy_cmd_file
+    global STAND_HEIGHT, MIN_HEIGHT, MAX_HEIGHT
     parser = argparse.ArgumentParser(description="HTTP IPC server for AGILE box_demo_2")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=5001)
     parser.add_argument("--backend", choices=("command-json", "legacy-ipc"), default="command-json")
     parser.add_argument("--state-dir", default=DEFAULT_STATE_DIR)
     parser.add_argument("--legacy-cmd-file", default=LEGACY_CMD_FILE)
+    parser.add_argument("--stand-height", type=float, default=STAND_HEIGHT)
+    parser.add_argument("--min-height", type=float, default=MIN_HEIGHT)
+    parser.add_argument("--max-height", type=float, default=MAX_HEIGHT)
     args = parser.parse_args()
+    if not args.min_height <= args.stand_height <= args.max_height:
+        parser.error("--stand-height must be inside --min-height..--max-height")
+    STAND_HEIGHT = float(args.stand_height)
+    MIN_HEIGHT = float(args.min_height)
+    MAX_HEIGHT = float(args.max_height)
     _backend = args.backend
     _state_dir = Path(args.state_dir).expanduser()
     _state_dir.mkdir(parents=True, exist_ok=True)
@@ -270,6 +294,7 @@ def main() -> None:
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"AGILE box_demo HTTP IPC server: http://{args.host}:{args.port}")
     print(f"backend={_backend}")
+    print(f"height: stand={STAND_HEIGHT:.2f} range={MIN_HEIGHT:.2f}..{MAX_HEIGHT:.2f}")
     print(f"Writing commands to {read_status()['cmd_file']}")
     try:
         server.serve_forever()
