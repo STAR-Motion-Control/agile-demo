@@ -93,7 +93,7 @@ def _runtime_float(env_name: str, key: str, default: float) -> float:
 # same DWBC Balance/Walk artifacts on 4090-lab. GROOT_STAND_HEIGHT keeps a
 # separately launched box_demo aligned with start_g1_onboard.sh --stand-height.
 STAND_HEIGHT = float(os.environ.get("GROOT_STAND_HEIGHT", "0.76"))
-MIN_HEIGHT = 0.40
+MIN_HEIGHT = 0.30
 MAX_HEIGHT = 0.80
 
 # GR00T-WBC Balance<->Walk switch (raw physical norm). Below this -> no stepping.

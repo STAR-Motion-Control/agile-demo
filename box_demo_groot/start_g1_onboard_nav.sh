@@ -320,6 +320,8 @@ tmux split-window -h -t "$SESSION" "
         --yaw-max '$YAW_MAX' \
         --height-rate '$HEIGHT_RATE' \
         --stand-height '$STAND_HEIGHT' \
+        --min-height 0.30 \
+        --max-height 0.80 \
         --walk-height-floor '$WALK_FLOOR' \
         $AUTO_POLICY_ARGS \
         ${ADAPTER_EXTRA[*]} \
@@ -335,7 +337,7 @@ tmux split-window -v -t "$SESSION:0.1" "
         --port '$HTTP_PORT' \
         --legacy-cmd-file '$LEGACY_CMD_FILE' \
         --stand-height '$STAND_HEIGHT' \
-        --min-height 0.40 \
+        --min-height 0.30 \
         --max-height 0.80
     echo '[HTTP IPC bridge exited]'; exec bash"
 
@@ -351,7 +353,7 @@ tmux split-window -v -t "$SESSION:0.0" "
     # 统一键速(7-06): 前进0.40(后退被 adapter 硬截0.2), vy 0.25(round12), wz 0.40
     python '$SCRIPT_DIR/agile_keyboard_control.py' --key-timeout 0.25 \
         --vx 0.40 --vy 0.25 --wz 0.40 \
-        --stand-height '$STAND_HEIGHT' --min-height 0.40 --max-height 0.80
+        --stand-height '$STAND_HEIGHT' --min-height 0.30 --max-height 0.80
     echo '[keyboard exited]'; exec bash"
 
 tmux select-layout -t "$SESSION" tiled

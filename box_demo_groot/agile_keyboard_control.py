@@ -33,7 +33,7 @@ import tty
 
 CMD_FILE = "/tmp/robojudo_ext_cmd.json"
 STAND_HEIGHT = 0.74  # match bundled Decoupled-WBC DEFAULT_BASE_HEIGHT / adapter --stand-height
-MIN_HEIGHT = 0.40
+MIN_HEIGHT = 0.30
 MAX_HEIGHT = 0.74  # raise cap too, else clamp() pulls STAND_HEIGHT back down
 
 

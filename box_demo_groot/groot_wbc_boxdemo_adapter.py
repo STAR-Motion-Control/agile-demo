@@ -33,7 +33,7 @@ CMD_FILE = "/tmp/robojudo_ext_cmd.json"
 TAPTAP_STATUS_FILE = "/tmp/groot_taptap_status.json"
 
 DEFAULT_BASE_HEIGHT = 0.74
-DEFAULT_MIN_HEIGHT = 0.40
+DEFAULT_MIN_HEIGHT = 0.30
 DEFAULT_MAX_HEIGHT = 0.80
 # vx 不对称硬限(2026-07-06 真机): 快速后退(0.4)保不住高度越走越低直至摔;
 # 后退安全上限 0.2 — 有意不开放 CLI(别改成旗标); 前进硬顶 1.0(--fwd-max 给
