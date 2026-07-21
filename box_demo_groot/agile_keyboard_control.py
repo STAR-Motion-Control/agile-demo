@@ -71,7 +71,7 @@ def main():
     p.add_argument("--vy", type=float, default=0.30, help="A/D speed in m/s")
     p.add_argument("--wz", type=float, default=0.4, help="Q/E yaw rate in rad/s")
     p.add_argument("--height-step", type=float, default=0.02, help="Z/X height increment in m")
-    p.add_argument("--pick-height", type=float, default=0.55, help="C key preset height in m")
+    p.add_argument("--pick-height", type=float, default=0.36, help="C key preset height in m")
     p.add_argument("--stand-height", type=float, default=STAND_HEIGHT,
                    help="initial height and R-key preset in m")
     p.add_argument("--min-height", type=float, default=MIN_HEIGHT)

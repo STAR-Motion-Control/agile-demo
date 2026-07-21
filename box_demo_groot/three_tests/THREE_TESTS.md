@@ -197,7 +197,7 @@ obscomp = 腰pitch 动作目标 `+= lean`, 同时喂策略的 obs 腰pitch `-= l
   "很不稳";
 - **h0.74(站高)是后退/横移最优点**; **h0.78 并不更稳**(后仰峰 −10.5° 最深,
   停稳振荡更大) — "站更高退更直"不成立;
-- 低位入口: 键盘 `c`(pick 0.55)/`z` 降高 / nav HTTP 带 height 命令。groot_mover
+- 低位入口: 键盘 `c`(pick 0.36)/`z` 降高 / nav HTTP 带 height 命令。groot_mover
   早有 WALK_MIN_HEIGHT=0.72 地板, 但键盘/nav 链路没有 →
 - **修复**: adapter 加 `--walk-height-floor 0.72`(默认开, 0=关): 速度非零且命令
   高度低于地板 → 拦速度打印 [GATE]; 高度从低位恢复(slew)期间也拦, 恢复过 0.72

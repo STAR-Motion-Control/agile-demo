@@ -30,7 +30,7 @@ bash start_groot_wbc_manual.sh --iface enp130s0 \
 
 | 键 | 动作 | 键 | 动作 |
 |----|------|----|------|
-| `w` / `s` | 前进 / 后退(±vx) | `c` | 蹲到 pick-height 0.55m |
+| `w` / `s` | 前进 / 后退(±vx) | `c` | 蹲到 pick-height 0.36m |
 | `a` / `d` | 左移 / 右移(±vy) | `r` | 回站立 0.74m |
 | `q` / `e` | 左转 / 右转(±wz) | `space` | 停(速度归零) |
 | `z` / `x` | 高度 −/+ 2cm | `f` / `l` | 切 FSM RL_FULL / RL_LOWER |
