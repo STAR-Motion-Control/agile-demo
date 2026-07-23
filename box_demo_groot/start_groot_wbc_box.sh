@@ -168,7 +168,9 @@ if [[ "$WITH_KEYBOARD" == "1" ]]; then
         echo '=== pane3: keyboard IPC control ==='
         echo \"python: \$BOX_PY\"
         echo 'focus this pane for WASD/QE, z/x height, c pick-height, r stand'
-        \"\$BOX_PY\" '$SCRIPT_DIR/agile_keyboard_control.py'
+        echo 'H-key arm control disabled here: box_demo owns rt/arm_sdk'
+        \"\$BOX_PY\" '$SCRIPT_DIR/agile_keyboard_control.py' \
+            --iface '$IFACE' --disable-arm-hang-key
         echo '[keyboard exited]'
         exec bash"
 fi

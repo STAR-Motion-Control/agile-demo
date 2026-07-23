@@ -119,6 +119,8 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 - `a/d`：左/右横移，导航启动器传参为 `0.25 m/s`。
 - `q/e`：左/右转向，导航启动器传参为 `0.40 rad/s`。
 - `z/x`：高度下降/上升。
+- `h`：先停止底座，再用 3 秒平滑过渡到双臂自然下垂；再次按下用
+  2.5 秒对齐实时 policy 后释放。检测到其他 `arm_sdk` 发布者时拒绝接管。
 - `space`：速度归零，GR00T 继续保持平衡。
 - `o`：DAMP 阻尼急停；adapter 以当前关节位置为目标，对全身命令 `dq=0`、`kp=0`、`kd=damping`。
 - `Ctrl+C`：退出键盘 pane，并写零速度。
@@ -126,7 +128,7 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 切换要求：
 
 - 手动键盘验底座时，不要发 `/nav/relative_cmd` 或 `/nav/text_nav`。
-- 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r`；现场只保留 `space` 和 `o` 作为人工安全入口。
+- 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r/h`；现场只保留 `space` 和 `o` 作为人工安全入口。
 
 ROS 导航信号和 HTTP bridge 使用同一组巡航速度：前进 `0.40 m/s`、后退
 `0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`。adapter 上限为

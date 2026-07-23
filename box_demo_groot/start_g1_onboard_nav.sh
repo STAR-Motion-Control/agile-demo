@@ -349,17 +349,18 @@ echo "nav_uat motion profile: $NAV_MOTION_PROFILE (由 $NAV_PROFILE_FILE 传给 
 tmux split-window -v -t "$SESSION:0.0" "
     $SETUP; cd '$SCRIPT_DIR'; sleep 3
     echo '=== pane4: direct IPC keyboard (same as start_g1_onboard.sh) ==='
-    echo 'w/s/a/d/q/e move, z/x height, space stop, o DAMP. Do not use during active ROS nav commands.'
+    echo 'w/s/a/d/q/e move, z/x height, h natural arm hang, space stop, o DAMP. Do not use during active ROS nav commands.'
     # 统一键速(7-06): 前进0.40(后退被 adapter 硬截0.2), vy 0.25(round12), wz 0.40
     python '$SCRIPT_DIR/agile_keyboard_control.py' --key-timeout 0.25 \
         --vx 0.40 --vy 0.25 --wz 0.40 \
+        --iface '$IFACE' --arm-hang-duration 3.0 --arm-release-duration 2.5 \
         --stand-height '$STAND_HEIGHT' --min-height 0.30 --max-height 0.80
     echo '[keyboard exited]'; exec bash"
 
 tmux select-layout -t "$SESSION" tiled
 
 echo "注意: 本 session 不启动 box_demo_main.py。pane4 键盘与 ROS 导航命令都写 /tmp/robojudo_ext_cmd.json，二者必须人工互斥。"
-echo "键盘: w/s/a/d/q/e 运动, z/x 高度, space=速度归零并保持平衡, o=DAMP 策略急停, Ctrl+C=退出键盘。"
+echo "键盘: w/s/a/d/q/e 运动, z/x 高度, h=双臂自然下垂/平滑交还, space=速度归零并保持平衡, o=DAMP 策略急停, Ctrl+C=退出键盘。"
 
 if [[ "$ATTACH" == "1" ]]; then
     tmux attach -t "$SESSION"

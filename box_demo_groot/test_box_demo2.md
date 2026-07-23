@@ -34,7 +34,12 @@ bash start_groot_wbc_manual.sh --iface enp130s0 \
 | `a` / `d` | 左移 / 右移(±vy) | `r` | 回站立 0.74m |
 | `q` / `e` | 左转 / 右转(±wz) | `space` | 停(速度归零) |
 | `z` / `x` | 高度 −/+ 2cm | `f` / `l` | 切 FSM RL_FULL / RL_LOWER |
+| `h` | 平滑切到双臂自然下垂；再次按下平滑交还 policy | | |
 | | | `o` | 急停(DAMP,仅阻尼) |
+
+`h` 会先把底座速度归零，并且只在 `rt/lowcmd_rl` 与最终 `rt/lowcmd`
+均新鲜、没有其他活跃 `rt/arm_sdk` 发布者时接管。完整 box_demo 操控场景会
+禁用此键，避免和抓取控制器双写手臂。
 
 ---
 

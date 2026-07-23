@@ -16,6 +16,7 @@ Keys:
   space: stop velocity, keep current height
   f:   RL_FULL mode
   l:   RL_LOWER mode (legs balance, upper body free for arm_sdk)
+  h:   toggle smooth natural arm hang / hand back to policy
   o:   damping/e-stop request
   Ctrl+C: exit
 """
@@ -30,6 +31,8 @@ import sys
 import termios
 import time
 import tty
+
+from keyboard_arm_hang import KeyboardArmHangController
 
 CMD_FILE = "/tmp/robojudo_ext_cmd.json"
 STAND_HEIGHT = 0.74  # match bundled Decoupled-WBC DEFAULT_BASE_HEIGHT / adapter --stand-height
@@ -78,6 +81,28 @@ def main():
     p.add_argument("--max-height", type=float, default=MAX_HEIGHT)
     p.add_argument("--refresh-hz", type=float, default=20.0)
     p.add_argument("--key-timeout", type=float, default=0.25, help="velocity expires after no key input")
+    p.add_argument(
+        "--iface",
+        default=os.environ.get("UNITREE_DDS_INTERFACE", "enP8p1s0"),
+        help="DDS interface used by the optional H-key arm controller",
+    )
+    p.add_argument(
+        "--arm-hang-duration",
+        type=float,
+        default=3.0,
+        help="H-key transition time from live policy command to natural hang",
+    )
+    p.add_argument(
+        "--arm-release-duration",
+        type=float,
+        default=2.5,
+        help="second H-key transition time back to live policy command",
+    )
+    p.add_argument(
+        "--disable-arm-hang-key",
+        action="store_true",
+        help="disable DDS arm helper while retaining lower-body keyboard control",
+    )
     args = p.parse_args()
 
     if not args.min_height <= args.stand_height <= args.max_height:
@@ -88,12 +113,29 @@ def main():
     last_motion_key = 0.0
     dirty = True
     dt = 1.0 / args.refresh_hz
+    arm_hang = None
+    arm_status = "disabled"
+    if not args.disable_arm_hang_key:
+        try:
+            arm_hang = KeyboardArmHangController(
+                args.iface,
+                move_duration=args.arm_hang_duration,
+                release_duration=args.arm_release_duration,
+            )
+            arm_hang.start()
+            arm_status = arm_hang.state
+        except Exception as exc:
+            arm_hang = None
+            arm_status = "unavailable"
+            print(f"[ARM_HANG][WARN] H 键不可用，腿部键盘控制继续运行: {exc}")
 
     print("=" * 64)
     print("AGILE keyboard control -> /tmp/robojudo_ext_cmd.json")
     print("  w/s forward/back, a/d strafe, q/e yaw")
     print("  z/x height -/+ 2cm, c pick-height, r stand, space stop")
-    print("  f RL_FULL, l RL_LOWER, o damping/e-stop, Ctrl+C exit")
+    print("  f RL_FULL, l RL_LOWER, h natural-hang toggle")
+    print("  o damping/e-stop, Ctrl+C exit")
+    print("  h 只在 rt/lowcmd_rl 新鲜时接管；操控程序正在发布 arm_sdk 时不要按 h")
     print(f"  height: stand={args.stand_height:.2f}m "
           f"range={args.min_height:.2f}..{args.max_height:.2f}m")
     print("=" * 64)
@@ -146,12 +188,28 @@ def main():
                     fsm = "RL_LOWER"
                     vx = vy = wz = 0.0
                     dirty = True
+                elif ch == "h":
+                    vx = vy = wz = 0.0
+                    last_motion_key = 0.0
+                    dirty = True
+                    if arm_hang is None:
+                        print("\n[ARM_HANG] H 键不可用")
+                    else:
+                        ok, message = arm_hang.toggle()
+                        arm_status = arm_hang.state
+                        if ok:
+                            print(f"\n[ARM_HANG] {message}")
+                        else:
+                            print(f"\n[ARM_HANG][WARN] {message}")
                 elif ch == "o":
                     fsm = "DAMP"
                     vx = vy = wz = 0.0
                     last_motion_key = 0.0
                     write_cmd(fsm, 0.0, 0.0, 0.0, height,
                               args.min_height, args.max_height, estop=True)
+                    if arm_hang is not None:
+                        arm_hang.emergency_release()
+                        arm_status = arm_hang.state
                     print("\n[DAMP] e-stop request written")
                     continue
 
@@ -166,8 +224,11 @@ def main():
                     allow_recovery=(fsm == "RL_FULL"),
                 )
                 dirty = False
+            if arm_hang is not None:
+                arm_status = arm_hang.state
             print(
-                f"\rmode={fsm:8s} vx={vx:+.2f} vy={vy:+.2f} wz={wz:+.2f} height={height:.2f}m",
+                f"\rmode={fsm:8s} vx={vx:+.2f} vy={vy:+.2f} wz={wz:+.2f} "
+                f"height={height:.2f}m arm={arm_status:19s}",
                 end="",
                 flush=True,
             )
@@ -178,6 +239,9 @@ def main():
             allow_recovery=False,
         )
     finally:
+        if arm_hang is not None:
+            print("\n[ARM_HANG] 键盘退出前平滑交还双臂...")
+            arm_hang.shutdown(graceful=True)
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old)
 
 

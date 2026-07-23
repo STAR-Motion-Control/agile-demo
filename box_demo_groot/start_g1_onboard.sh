@@ -151,6 +151,13 @@ BOX="${BOX:-0}"
 # 微调走路时腰(12-14)归 policy(修垂臂后转向前漂/起步晃/back-lean失效), 静止拍照/
 # 抓取仍由 arm_sdk 锁零。WAIST_RL=0 = 旧行为(A/B 对比用)。详见 WAIST_HANDOVER_PLAN.md
 WAIST_RL="${WAIST_RL:-1}"
+if [[ "$BOX" == "1" ]]; then
+    # box_demo has its own rt/arm_sdk publisher. Keep the keyboard from becoming
+    # a second arm writer in that scene.
+    ARM_HANG_EXTRA="--disable-arm-hang-key"
+else
+    ARM_HANG_EXTRA=""
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"      # = ~/zihou/box_demo_2
 IFACE="${IFACE:-enP8p1s0}"
@@ -282,12 +289,14 @@ tmux split-window -h -t "$SESSION" "
     echo '[adapter exited]'; exec bash"
 tmux split-window -v -t "$SESSION:0.1" "
     $SETUP; cd '$SCRIPT_DIR'; sleep 2
-    echo '=== pane3: 键盘 (w/s/a/d/q/e, z/x 高度, space 停, o 急停) ==='
+    echo '=== pane3: 键盘 (w/s/a/d/q/e, z/x 高度, h 双臂自然下垂, space 停, o 急停) ==='
     echo '跑 three_tests 前先 Ctrl-C 掉本 pane (单写者)!'
     # vx 0.40=前进(后退被 adapter 硬截 0.2, 键盘无需分开); vy 0.25=round12 中点;
     # wz 0.40=7-06 现场定(0.15 太慢)。后退硬限在 adapter BACK_VX_MAX, 键盘改不动。
     python '$SCRIPT_DIR/agile_keyboard_control.py' --key-timeout 0.25 \
         --vx 0.40 --vy 0.25 --wz 0.40 \
+        --iface '$IFACE' --arm-hang-duration 3.0 --arm-release-duration 2.5 \
+        $ARM_HANG_EXTRA \
         --stand-height '$STAND_H' --min-height 0.30 --max-height 0.80
     echo '[keyboard exited]'; exec bash"
 if [[ "$BOX" == "1" ]]; then
