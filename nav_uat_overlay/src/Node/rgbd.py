@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 class RGBDClient(Node):
     """Single camera ingress for the navigation process.
 
-    Direct RealSense frames stay in process through ``CameraFrameHub``. Raw ROS
-    image publication is opt-in for external consumers and is never used by the
-    in-process localization or planner nodes.
+    Direct RealSense frames stay in process through ``CameraFrameHub``. Legacy
+    raw ROS image publication remains configurable for external consumers, but
+    is never used by the in-process localization or planner nodes.
     """
 
     def __init__(self, cfg, visualization=None, frame_hub=None, require_depth=False):
@@ -36,7 +36,7 @@ class RGBDClient(Node):
         self._camera_error_backoff = CaptureErrorBackoff()
 
         rgbd_cfg = cfg.rgbd_server
-        self.publish_ros_topics = bool(config_get(rgbd_cfg, "publish_ros_topics", False))
+        self.publish_ros_topics = bool(config_get(rgbd_cfg, "publish_ros_topics", True))
         self.capture_depth = resolve_capture_depth(
             rgbd_cfg,
             require_depth=self.require_depth,
@@ -80,7 +80,7 @@ class RGBDClient(Node):
         rs = self._load_realsense()
         width = int(config_get(rgbd_cfg, "width", 640))
         height = int(config_get(rgbd_cfg, "height", 480))
-        fps = int(config_get(rgbd_cfg, "fps", 15))
+        fps = int(config_get(rgbd_cfg, "fps", 30))
         serial_number = str(config_get(rgbd_cfg, "serial_number", "419222302306"))
 
         self._rs = rs

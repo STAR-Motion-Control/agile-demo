@@ -22,7 +22,8 @@ def resolve_capture_depth(rgbd_cfg: Any, require_depth: bool = False) -> bool:
     configured = config_get(rgbd_cfg, "capture_depth", None)
     if configured is not None:
         return bool(configured)
-    return bool(config_get(rgbd_cfg, "publish_ros_topics", False))
+    # Legacy configs predate both keys and always captured/published depth.
+    return bool(config_get(rgbd_cfg, "publish_ros_topics", True))
 
 
 def resolve_executor_threads(cfg: Any, default: int = 2) -> int:

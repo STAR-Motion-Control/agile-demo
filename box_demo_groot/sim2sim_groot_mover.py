@@ -31,15 +31,22 @@ class SimMover(gm.GrootMover):
         super().__init__(verbose=False, stand_height=STAND, **kw)
         self._sim = sim
 
-    def _hold(self, forward, lateral, yaw, duration):
+    def _hold(self, forward, lateral, yaw, duration, cancel_event=None):
         if duration <= 0:
-            return
+            return True
         for _ in range(int(round(duration / CTRL_DT))):
+            if cancel_event is not None and cancel_event.is_set():
+                return False
             self._sim.step_once([forward, lateral, yaw], self._height)
+        return True
 
-    def _settle(self):
+    def _settle(self, allow_recovery=None, cancel_event=None):
+        del allow_recovery
         for _ in range(int(round(self.stop_hold_s / CTRL_DT))):
+            if cancel_event is not None and cancel_event.is_set():
+                return False
             self._sim.step_once([0.0, 0.0, 0.0], self._height)
+        return True
 
     def set_height(self, height):
         self._height = float(gm._clamp(height, gm.MIN_HEIGHT, gm.MAX_HEIGHT))

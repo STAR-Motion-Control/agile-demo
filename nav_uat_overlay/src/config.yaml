@@ -19,11 +19,14 @@ runtime:
 
 rgbd_server:
   launch_rgbd_server: true
-  publish_ros_topics: false
-  capture_depth: null
+  # Preserve the live navigation camera/topic contract. In-process consumers
+  # read FrameHub directly, so these publications no longer loop back through
+  # Localization and ActionPlanner.
+  publish_ros_topics: true
+  capture_depth: true
   width: 640
   height: 480
-  fps: 15
+  fps: 30
   serial_number: "419222302306"
   publish_topic:
     rgb: /externel_front_image

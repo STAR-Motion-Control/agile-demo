@@ -272,13 +272,14 @@ cold manipulation HTTP ingress
 RealSense / external ROS image
   -> navigation CameraFrameHub        [latest-only]
        -> VPR 触发时才取 RGB
-       -> NavDP 启用时才采/取 depth
-       -> raw ROS publish 可选，默认关
+       -> 保留 depth 采集，NavDP 请求时才转 float32 米制
+       -> raw ROS publish 保留给进程外兼容消费者
 ```
 
 导航候选默认还包括：
 
-- 相机 15 FPS。
+- 保留原相机 640x480@30 FPS、RGB-D 采集和 ROS 话题；内部 VPR/NavDP
+  直接读取 FrameHub，不再通过 ROS 回环解码。
 - ROS executor 显式限制为 2 线程。
 - RealSense `uint16` depth 到米制 `float32` 的转换延迟到 NavDP 请求时。
 - 实时 JPEG frame pipeline、GIF、VPR 图片落盘和 replay 默认关闭并延迟导入。

@@ -52,6 +52,9 @@ On G001 the RGBD input is published by `RGBDClient` itself. Confirm
 ```yaml
 rgbd_server:
   launch_rgbd_server: true
+  publish_ros_topics: true
+  capture_depth: true
+  fps: 30
   publish_topic:
     rgb: /externel_front_image
     depth: /externel_front_depth

@@ -35,8 +35,9 @@ def test_model_planner_and_diagnostics_default_to_disabled():
 
 
 def test_depth_capture_tracks_navdp_or_explicit_external_publication():
-    assert resolve_capture_depth({}, require_depth=False) is False
+    assert resolve_capture_depth({}, require_depth=False) is True
     assert resolve_capture_depth({"publish_ros_topics": True}, require_depth=False) is True
+    assert resolve_capture_depth({"publish_ros_topics": False}, require_depth=False) is False
     assert resolve_capture_depth({"capture_depth": True}, require_depth=False) is True
     assert resolve_capture_depth({"capture_depth": False}, require_depth=True) is True
 
