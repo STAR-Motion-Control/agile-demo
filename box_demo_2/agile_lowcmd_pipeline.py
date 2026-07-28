@@ -398,6 +398,34 @@ def build_pos_limits(config: dict, joint_names: list, device):
     return lower, upper
 
 
+def build_upper_hold_gains(config: dict, scale: float, fallback_kp: float,
+                           fallback_kd: float) -> dict[int, tuple[float, float]]:
+    """Per-motor (kp, kd) hold gains for the 17 non-action joints (motors 12-28).
+
+    The policy was trained with these joints PD-pinned at the default pose
+    using the YAML default_joint_stiffness/damping (waist 300/5,
+    shoulder_pitch 90/2, shoulder_roll+elbow 60/1, shoulder_yaw 20/0.4,
+    wrist 4/0.2).  Holding them at a uniform soft kp=40/kd=1 leaves the waist
+    7.5x softer than training and the arms underdamped — the observed
+    arm-flailing on the gantry (2026-07-07 analysis).  Use the training gains,
+    optionally scaled by --upper-hold-scale.
+    """
+    robot = config["articulations"]["robot"]
+    names = list(robot["joint_names"])
+    kps = robot.get("default_joint_stiffness")
+    kds = robot.get("default_joint_damping")
+    gains: dict[int, tuple[float, float]] = {}
+    for i, name in enumerate(names):
+        mi = MOTOR_BY_JOINT.get(name)
+        if mi is None or mi <= 11:
+            continue
+        if kps is None or kds is None:
+            gains[mi] = (float(fallback_kp), float(fallback_kd))
+        else:
+            gains[mi] = (float(kps[i]) * scale, float(kds[i]) * scale)
+    return gains
+
+
 def _stamp_motor(cmd, idx: int, q: float, kp: float, kd: float) -> None:
     m = cmd.motor_cmd[idx]
     m.mode = MOTOR_MODE_ENABLE
@@ -417,7 +445,7 @@ def pose_by_motor(joint_names: list[str], pose) -> dict[int, float]:
 
 
 def build_lowcmd(msg, joint_names: list[str], joint_cmd: JointCommand,
-                 upper_hold_kp: float, upper_hold_kd: float, mode_pr: int,
+                 upper_gains: dict[int, tuple[float, float]], mode_pr: int,
                  upper_target_by_motor: dict[int, float] | None = None):
     from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
 
@@ -444,7 +472,8 @@ def build_lowcmd(msg, joint_names: list[str], joint_cmd: JointCommand,
             q = float(msg.motor_state[mi].q)
             if upper_target_by_motor is not None and mi in upper_target_by_motor:
                 q = upper_target_by_motor[mi]
-            _stamp_motor(out, mi, q, upper_hold_kp, upper_hold_kd)
+            hold_kp, hold_kd = upper_gains.get(mi, (40.0, 1.0))
+            _stamp_motor(out, mi, q, hold_kp, hold_kd)
 
     # arm_sdk enable slot: AGILE lower pipeline never requests upper override.
     _stamp_motor(out, 29, 0.0, 0.0, 0.0)
@@ -466,7 +495,7 @@ def build_damping_lowcmd(msg, kd_value: float, mode_pr: int):
 def publish_prepare(pub, crc, state_buf, joint_names: list[str], default_pos: torch.Tensor,
                     kp: torch.Tensor, kd: torch.Tensor, prepare_s: float,
                     hz: float, mode_pr: int, dry_run: bool, state_timeout_s: float,
-                    upper_hold_kp: float, upper_hold_kd: float) -> bool:
+                    upper_gains: dict[int, tuple[float, float]]) -> bool:
     """Cosine ramp from the measured pose to the policy default.
 
     Re-snapshots LowState every step and aborts (returns False) if the stream
@@ -491,8 +520,7 @@ def publish_prepare(pub, crc, state_buf, joint_names: list[str], default_pos: to
         jc = JointCommand(position=pos, kp=kp, kd=kd)
         out = build_lowcmd(
             msg, joint_names, jc,
-            upper_hold_kp=upper_hold_kp,
-            upper_hold_kd=upper_hold_kd,
+            upper_gains=upper_gains,
             mode_pr=mode_pr,
             upper_target_by_motor=pose_by_motor(joint_names, pos),
         )
@@ -505,7 +533,7 @@ def publish_prepare(pub, crc, state_buf, joint_names: list[str], default_pos: to
 
 def main():
     p = argparse.ArgumentParser(description="AGILE lower-body rt/lowcmd_rl pipeline for box_demo_2")
-    p.add_argument("--iface", default=os.environ.get("UNITREE_DDS_INTERFACE", "enx2c16dbaa7742"))
+    p.add_argument("--iface", default=os.environ.get("UNITREE_DDS_INTERFACE", "enP8p1s0"))
     p.add_argument("--domain", type=int, default=0)
     p.add_argument("--agile-repo", type=Path, default=Path(os.environ.get("AGILE_REPO", DEFAULT_REPO)))
     p.add_argument("--policy", type=Path, default=None)
@@ -518,9 +546,15 @@ def main():
     p.add_argument("--fwd-max", type=float, default=0.50, help="legacy normalized forward=1 maps to this m/s")
     p.add_argument("--lat-max", type=float, default=0.30, help="legacy normalized lateral=1 maps to this m/s")
     p.add_argument("--yaw-max", type=float, default=0.60, help="legacy normalized yaw=1 maps to this rad/s")
-    p.add_argument("--upper-hold-kp", type=float, default=40.0)
-    p.add_argument("--upper-hold-kd", type=float, default=1.0)
+    p.add_argument("--upper-hold-kp", type=float, default=40.0,
+                   help="fallback upper hold kp, used only if the YAML lacks per-joint gains")
+    p.add_argument("--upper-hold-kd", type=float, default=1.0,
+                   help="fallback upper hold kd, used only if the YAML lacks per-joint gains")
+    p.add_argument("--upper-hold-scale", type=float, default=1.0,
+                   help="scale on the per-joint training hold gains for waist+arms "
+                        "(waist 300/5, shoulder 90/2 ... from the YAML); 1.0 = as trained")
     p.add_argument("--prepare-s", type=float, default=2.0)
+    p.add_argument("--torch-threads", type=int, default=int(os.environ.get("TORCH_THREADS", "1")))
     p.add_argument("--damping-kd", type=float, default=8.0)
     p.add_argument("--dry-run", action="store_true", help="compute policy but do not publish rt/lowcmd_rl")
     p.add_argument("--no-motion-release", dest="motion_release", action="store_false",
@@ -556,6 +590,11 @@ def main():
     import numpy as np
     import torch
     import yaml
+    torch.set_num_threads(max(1, int(args.torch_threads)))
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
 
     _load_ddsc()
     from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
@@ -623,8 +662,14 @@ def main():
     print(f"  config:        {config_path}")
     print(f"  publish:       {'DRY-RUN' if args.dry_run else 'rt/lowcmd_rl'} @ {args.hz:.1f}Hz")
     print(f"  command IPC:   {CMD_FILE}")
+    print(f"  torch threads: {torch.get_num_threads()}")
     print(f"  recurrent buffers zeroed: {n_zeroed}")
-    print(f"  upper body:    AGILE default pose hold kp={args.upper_hold_kp:.1f} kd={args.upper_hold_kd:.1f}")
+    upper_gains = build_upper_hold_gains(
+        config, args.upper_hold_scale, args.upper_hold_kp, args.upper_hold_kd)
+    _waist_kp, _waist_kd = upper_gains.get(MOTOR_BY_JOINT["waist_yaw_joint"], (0.0, 0.0))
+    _sp_kp, _sp_kd = upper_gains.get(MOTOR_BY_JOINT["left_shoulder_pitch_joint"], (0.0, 0.0))
+    print(f"  upper body:    default pose hold @ training gains x{args.upper_hold_scale:.2f} "
+          f"(waist kp={_waist_kp:.0f}/kd={_waist_kd:.1f}, shoulder_pitch kp={_sp_kp:.0f}/kd={_sp_kd:.1f})")
     print("  height keys:   z/x in agile_keyboard_control.py, safe range 0.40..0.72m")
     print("=" * 72)
 
@@ -671,7 +716,7 @@ def main():
         pub, crc, state_buf, joint_names, default_pos,
         act_processor.kp.detach(), act_processor.kd.detach(),
         args.prepare_s, args.hz, args.mode_pr, args.dry_run, args.state_timeout_s,
-        args.upper_hold_kp, args.upper_hold_kd,
+        upper_gains,
     )
     obs_processor.reset()
     zero_policy_recurrent_state(policy)
@@ -735,6 +780,27 @@ def main():
                 prev_pos = None
                 out = build_damping_lowcmd(msg, args.damping_kd, args.mode_pr)
             else:
+                if prev_pos is None:
+                    # Resuming policy control after DAMP / state-stale: never
+                    # hand the LSTM its frozen pre-DAMP memory at an arbitrary
+                    # pose under full stiffness.  Re-ramp to the default pose,
+                    # then clear recurrent state + obs history (same contract
+                    # as startup).  (2026-07-07 fall analysis, finding #2)
+                    print("[RESUME] DAMP->RL: prepare ramp + LSTM/obs reset")
+                    resumed_ok = publish_prepare(
+                        pub, crc, state_buf, joint_names, default_pos,
+                        act_processor.kp.detach(), act_processor.kd.detach(),
+                        args.prepare_s, args.hz, args.mode_pr, args.dry_run,
+                        args.state_timeout_s, upper_gains,
+                    )
+                    if not resumed_ok:
+                        faulted, fault_reason = True, "state stale during resume ramp"
+                        print(f"[SAFETY] entering damping — {fault_reason}")
+                        continue
+                    obs_processor.reset()
+                    zero_policy_recurrent_state(policy)
+                    prev_pos = default_pos.detach().clone()
+                    continue
                 mgr.set_command(vx, vy, wz, height_cmd)
                 sim_state = lowstate_to_sim_state(msg, joint_names, device)
                 obs = obs_processor.compute(sim_state)
@@ -755,7 +821,7 @@ def main():
                         safe_cmd = JointCommand(position=safe_pos, kp=joint_cmd.kp, kd=joint_cmd.kd)
                         out = build_lowcmd(
                             msg, joint_names, safe_cmd,
-                            args.upper_hold_kp, args.upper_hold_kd, args.mode_pr,
+                            upper_gains, args.mode_pr,
                             upper_target_by_motor=upper_default_by_motor,
                         )
                 if faulted:

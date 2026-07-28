@@ -1,6 +1,6 @@
 #!/bin/bash
 # G1 视觉抓取一键启动 —— tmux 三窗格，支持 SSH
-# 用法: ./start.sh --vlm-endpoint URL [--iface enx2c16dbaa7742] [--walk-scale 1.0] [--confirm]
+# 用法: ./start.sh --vlm-endpoint URL [--iface enP8p1s0] [--walk-scale 1.0] [--confirm]
 # 快捷键: Ctrl+B 方向键 切窗格, Ctrl+B D 退出(后台运行), tmux attach -t g1-grasp 重新连入
 
 set -e
@@ -11,7 +11,7 @@ SESSION="g1-grasp"
 
 # ── 参数 ─────────────────────────────────────────────────────────
 VLM_ENDPOINT="${VLM_ENDPOINT:-}"
-IFACE="${IFACE:-enx2c16dbaa7742}"
+IFACE="${IFACE:-enP8p1s0}"
 WALK_SCALE="${WALK_SCALE:-1.0}"
 NO_CONFIRM="--no-confirm"
 
@@ -27,7 +27,7 @@ done
 
 if [[ -z "$VLM_ENDPOINT" ]]; then
     echo "错误: 需要 --vlm-endpoint URL"
-    echo "用法: $0 --vlm-endpoint https://your-api/v1 [--iface enx2c16dbaa7742] [--walk-scale 1.0] [--confirm]"
+    echo "用法: $0 --vlm-endpoint https://your-api/v1 [--iface enP8p1s0] [--walk-scale 1.0] [--confirm]"
     exit 1
 fi
 

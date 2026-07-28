@@ -11,6 +11,7 @@
 """
 
 import argparse
+import base64
 import io
 import json
 import os
@@ -26,7 +27,7 @@ import requests
 # ──────────────────────────────────────────────
 # 相机配置
 # ──────────────────────────────────────────────
-HEAD_CAMERA_SERIAL = "406122070550"
+HEAD_CAMERA_SERIAL = os.environ.get("HEAD_CAMERA_SERIAL", "406122070550")
 SUDO_PASS = os.environ.get("UNITREE_SUDO_PASS", "")
 
 # 手动曝光参数（仅在 manual_exposure=True 时生效）
@@ -110,21 +111,30 @@ class CameraSession:
     """
 
     def __init__(self, color_w=640, color_h=480, fps=30,
-                 warmup_frames=50, manual_exposure=False):
+                 warmup_frames=50, manual_exposure=False,
+                 camera_url: str | None = None, serial: str | None = None):
         self._color_w = color_w
         self._color_h = color_h
         self._fps = fps
         self._warmup_frames = warmup_frames
         self._manual_exposure = manual_exposure
+        self._camera_url = camera_url or os.environ.get("CAMERA_URL", "")
+        self._serial = serial or os.environ.get("HEAD_CAMERA_SERIAL", HEAD_CAMERA_SERIAL)
         self._pipeline = None
         self._align = None
 
     def __enter__(self):
+        if self._camera_url:
+            print(f"[CameraSession] 使用网络 RGBD 相机 {self._camera_url}")
+            self.capture()
+            print("网络相机就绪。")
+            return self
+
         stop_videohub()
         self._pipeline = rs.pipeline()
         self._align = rs.align(rs.stream.color)
         config = rs.config()
-        config.enable_device(HEAD_CAMERA_SERIAL)
+        config.enable_device(self._serial)
         config.enable_stream(rs.stream.color, self._color_w, self._color_h,
                              rs.format.bgr8, self._fps)
         config.enable_stream(rs.stream.depth, self._color_w, self._color_h,
@@ -148,6 +158,9 @@ class CameraSession:
         return self
 
     def __exit__(self, *args):
+        if self._camera_url:
+            return
+
         if self._pipeline:
             try:
                 self._pipeline.stop()
@@ -157,6 +170,21 @@ class CameraSession:
 
     def capture(self):
         """从已就绪的管道抓一帧 RGB + 对齐深度图。"""
+        if self._camera_url:
+            resp = requests.get(self._camera_url, timeout=8)
+            if resp.status_code != 200:
+                raise RuntimeError(f"网络相机请求失败 [{resp.status_code}]: {resp.text[:200]}")
+            data = np.load(io.BytesIO(resp.content))
+            color = data["color"]
+            depth = data["depth"]
+            if color.ndim != 3 or color.shape[2] != 3:
+                raise RuntimeError(f"网络相机 RGB 形状异常: {color.shape}")
+            if depth.ndim != 2:
+                raise RuntimeError(f"网络相机深度形状异常: {depth.shape}")
+            if depth.dtype != np.uint16:
+                depth = depth.astype(np.uint16)
+            return color, depth
+
         frames = self._pipeline.wait_for_frames(timeout_ms=5000)
         aligned = self._align.process(frames)
         color_frame = aligned.get_color_frame()
@@ -238,8 +266,75 @@ def capture_rgbd(color_w=640, color_h=480, fps=30, warmup_frames=50,
 # ──────────────────────────────────────────────
 # SAM3 请求
 # ──────────────────────────────────────────────
+def _decode_sam3_image_b64(result: dict, key: str, *, is_jpeg: bool = True) -> np.ndarray | None:
+    """从 SAM3 JSON 响应解码 base64 图像，返回 BGR uint8 数组。"""
+    image_b64 = result.get(key)
+    if not image_b64:
+        return None
+    image_bytes = base64.b64decode(image_b64)
+    flag = cv2.IMREAD_COLOR
+    image_rgb = cv2.imdecode(np.frombuffer(image_bytes, np.uint8), flag)
+    if image_rgb is None:
+        return None
+    return cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+
+
+def _decode_sam3_overlay(result: dict) -> np.ndarray | None:
+    return _decode_sam3_image_b64(result, "overlay_image", is_jpeg=True)
+
+
+def _decode_sam3_html_field(result: dict, key: str) -> str | None:
+    """从 SAM3 JSON 响应解码 base64 HTML 字段。"""
+    html_b64 = result.get(key)
+    if not html_b64:
+        return None
+    try:
+        return base64.b64decode(html_b64).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
+
+
+def _decode_sam3_pointcloud_html(result: dict) -> str | None:
+    return _decode_sam3_html_field(result, "pointcloud_sor_dbscan_html")
+
+
+def _attach_sam3_images(meta: dict, body: dict) -> None:
+    overlay_before = _decode_sam3_image_b64(body, "overlay_before_erode_image", is_jpeg=True)
+    if overlay_before is None:
+        overlay_before = _decode_sam3_overlay(body)
+    if overlay_before is not None:
+        meta["overlay_before_erode"] = overlay_before
+        meta["has_overlay_before_erode"] = True
+        meta["overlay"] = overlay_before
+        meta["has_overlay"] = True
+
+    overlay_after = _decode_sam3_image_b64(body, "overlay_after_erode_image", is_jpeg=True)
+    if overlay_after is not None:
+        meta["overlay_after_erode"] = overlay_after
+        meta["has_overlay_after_erode"] = True
+
+    if "mask_erode_px" in body:
+        meta["mask_erode_px"] = body["mask_erode_px"]
+
+    touches = body.get("mask_touches")
+    if isinstance(touches, dict):
+        meta["mask_touches"] = touches
+
+    for key, meta_key, flag in (
+        ("pointcloud_initial_html", "pointcloud_initial_html", "has_pointcloud_initial"),
+        ("pointcloud_sor_html", "pointcloud_sor_html", "has_pointcloud_sor"),
+        ("pointcloud_sor_dbscan_html", "pointcloud_sor_dbscan_html", "has_pointcloud_sor_dbscan"),
+    ):
+        html = _decode_sam3_html_field(body, key)
+        if html is not None:
+            meta[meta_key] = html
+            meta[flag] = True
+
+
 def predict_from_arrays(color_bgr: np.ndarray, depth_u16: np.ndarray,
-                        prompt: str, host: str, port: int):
+                        prompt: str, host: str, port: int,
+                        point_cloud_stage: str,
+                        return_meta: bool = False):
     """
     把内存中的 numpy 图像直接编码后发送给 SAM3 服务端，无需先写文件。
 
@@ -248,6 +343,11 @@ def predict_from_arrays(color_bgr: np.ndarray, depth_u16: np.ndarray,
         depth_u16 : (H,W)   uint16 毫米
         prompt    : 文本提示词，如 'box'
         host/port : SAM3 服务端地址
+        point_cloud_stage: sor 或 sor_dbscan（SOR+DBSCAN），用于 OBB/RANSAC
+        return_meta: 为 True 时返回 (result, meta)；result 失败时为 None
+
+    Returns:
+        result dict 或 None；return_meta=True 时 (result, meta)
     """
     # RGB 编码为 JPEG bytes
     ok, rgb_buf = cv2.imencode(".jpg", color_bgr)
@@ -264,13 +364,33 @@ def predict_from_arrays(color_bgr: np.ndarray, depth_u16: np.ndarray,
         "rgb":   ("rgb.jpg",   rgb_buf.tobytes(),   "image/jpeg"),
         "depth": ("depth.png", depth_buf.tobytes(), "image/png"),
     }
-    data = {"prompt": prompt}
+    data = {
+        "prompt": prompt,
+        "point_cloud_stage": point_cloud_stage,
+    }
 
-    print(f"\n发送请求 → {url}  prompt='{prompt}'")
+    print(f"\n发送请求 → {url}  prompt='{prompt}'  point_cloud_stage='{point_cloud_stage}'")
     resp = requests.post(url, files=files, data=data, timeout=120)
 
     if resp.status_code != 200:
         print(f"请求失败 [{resp.status_code}]: {resp.text}")
+        meta = {
+            "ok": False,
+            "status_code": resp.status_code,
+            "error": resp.text,
+            "prompt": prompt,
+            "point_cloud_stage": point_cloud_stage,
+            "url": url,
+        }
+        try:
+            err_body = resp.json()
+            if isinstance(err_body, dict):
+                meta["error"] = err_body.get("detail", resp.text)
+                _attach_sam3_images(meta, err_body)
+        except (ValueError, requests.exceptions.JSONDecodeError):
+            pass
+        if return_meta:
+            return None, meta
         return None
 
     result = resp.json()
@@ -293,6 +413,33 @@ def predict_from_arrays(color_bgr: np.ndarray, depth_u16: np.ndarray,
     print(f"左侧面中点 (左手抓取): ({grasp_left[0]:.4f}, {grasp_left[1]:.4f}, {grasp_left[2]:.4f}) m")
     print(f"右侧面中点 (右手抓取): ({grasp_right[0]:.4f}, {grasp_right[1]:.4f}, {grasp_right[2]:.4f}) m")
 
+    meta = {
+        "ok": True,
+        "prompt": prompt,
+        "point_cloud_stage": result.get("point_cloud_stage", point_cloud_stage),
+        "url": url,
+        "center": center,
+        "extent": extent,
+        "rotation_matrix": R,
+        "length": length,
+        "grasp_left": grasp_left,
+        "grasp_right": grasp_right,
+        "has_overlay": "overlay_image" in result or "overlay_before_erode_image" in result,
+        "has_overlay_before_erode": (
+            "overlay_before_erode_image" in result or "overlay_image" in result
+        ),
+        "has_overlay_after_erode": "overlay_after_erode_image" in result,
+        "has_pointcloud_initial": "pointcloud_initial_html" in result,
+        "has_pointcloud_sor": "pointcloud_sor_html" in result,
+        "has_pointcloud_sor_dbscan": "pointcloud_sor_dbscan_html" in result,
+    }
+    if "mask_erode_px" in result:
+        meta["mask_erode_px"] = result["mask_erode_px"]
+    if "mask_touches" in result:
+        meta["mask_touches"] = result["mask_touches"]
+    _attach_sam3_images(meta, result)
+    if return_meta:
+        return result, meta
     return result
 
 
@@ -302,6 +449,9 @@ def predict_from_arrays(color_bgr: np.ndarray, depth_u16: np.ndarray,
 def main():
     parser = argparse.ArgumentParser(description="采集头部相机图像并发送给 SAM3 服务端")
     parser.add_argument("--prompt", default="box",              help="分割提示词，默认 box")
+    parser.add_argument("--point-cloud-stage", required=True,
+                        choices=("sor", "sor_dbscan"),
+                        help="SAM3 OBB 点云阶段：sor 或 sor_dbscan（SOR+DBSCAN）")
     parser.add_argument("--host",   default="192.168.112.103",  help="SAM3 服务端 IP")
     parser.add_argument("--port",   default=5300, type=int,     help="SAM3 服务端端口")
     parser.add_argument("--manual-exposure", action="store_true",
@@ -309,7 +459,8 @@ def main():
     args = parser.parse_args()
 
     color, depth = capture_rgbd(manual_exposure=args.manual_exposure)
-    predict_from_arrays(color, depth, args.prompt, args.host, args.port)
+    predict_from_arrays(color, depth, args.prompt, args.host, args.port,
+                        args.point_cloud_stage)
 
 
 if __name__ == "__main__":

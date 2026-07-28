@@ -14,9 +14,13 @@ SIM2REAL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SESSION="${SESSION:-g1-agile-box}"
 
 VLM_ENDPOINT="${VLM_ENDPOINT:-}"
-IFACE="${IFACE:-enx2c16dbaa7742}"
+SAM3_HOST="${SAM3_HOST:-127.0.0.1}"
+SAM3_PORT="${SAM3_PORT:-5300}"
+IFACE="${IFACE:-enP8p1s0}"
 AGILE_REPO="${AGILE_REPO:-$SIM2REAL_DIR/cc/experiments/repos/WBC-AGILE}"
 DEVICE="${DEVICE:-cpu}"
+CONDA_ENV="${CONDA_ENV:-hdmi}"
+TORCH_THREADS="${TORCH_THREADS:-1}"
 WALK_SCALE="${WALK_SCALE:-1.0}"
 FWD_MAX="${FWD_MAX:-0.50}"
 LAT_MAX="${LAT_MAX:-0.30}"
@@ -30,9 +34,13 @@ WITH_KEYBOARD=1
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --vlm-endpoint) VLM_ENDPOINT="$2"; shift 2 ;;
+        --sam3-host)    SAM3_HOST="$2";    shift 2 ;;
+        --sam3-port)    SAM3_PORT="$2";    shift 2 ;;
         --iface)        IFACE="$2";        shift 2 ;;
         --agile-repo)   AGILE_REPO="$2";   shift 2 ;;
         --device)       DEVICE="$2";       shift 2 ;;
+        --conda-env)    CONDA_ENV="$2";    shift 2 ;;
+        --torch-threads) TORCH_THREADS="$2"; shift 2 ;;
         --walk-scale)   WALK_SCALE="$2";   shift 2 ;;
         --fwd-max)      FWD_MAX="$2";      shift 2 ;;
         --lat-max)      LAT_MAX="$2";      shift 2 ;;
@@ -51,7 +59,7 @@ done
 
 if [[ -z "$VLM_ENDPOINT" ]]; then
     echo "错误: 需要 --vlm-endpoint URL"
-    echo "用法: $0 --vlm-endpoint https://your-api/v1 [--iface enx2c16dbaa7742] [--confirm]"
+    echo "用法: $0 --vlm-endpoint https://your-api/v1 [--sam3-host 127.0.0.1] [--sam3-port 5300] [--iface enP8p1s0] [--confirm]"
     exit 1
 fi
 
@@ -59,8 +67,11 @@ echo "========================================"
 echo "  G1 box_demo_2 + AGILE lower body"
 echo "  iface:      $IFACE"
 echo "  VLM:        $VLM_ENDPOINT"
+echo "  SAM3:       $SAM3_HOST:$SAM3_PORT"
 echo "  AGILE_REPO: $AGILE_REPO"
 echo "  device:     $DEVICE"
+echo "  conda env:  $CONDA_ENV"
+echo "  torch threads: $TORCH_THREADS"
 echo "  walk-scale: $WALK_SCALE"
 echo "  fwd/lat/yaw max: $FWD_MAX / $LAT_MAX / $YAW_MAX"
 echo "  height-rate: $HEIGHT_RATE"
@@ -70,21 +81,34 @@ echo "========================================"
 
 tmux kill-session -t "$SESSION" 2>/dev/null || true
 
+export OMP_NUM_THREADS="$TORCH_THREADS"
+export MKL_NUM_THREADS="$TORCH_THREADS"
+export OPENBLAS_NUM_THREADS="$TORCH_THREADS"
+export NUMEXPR_NUM_THREADS="$TORCH_THREADS"
+export VECLIB_MAXIMUM_THREADS="$TORCH_THREADS"
+
 tmux new-session -d -s "$SESSION" -n merge "
+    source '$HOME/miniconda3/etc/profile.d/conda.sh'
+    conda activate '$CONDA_ENV'
     cd '$SIM2REAL_DIR'
     echo '=== pane1: merge rt/lowcmd_rl + rt/arm_sdk -> rt/lowcmd ==='
+    echo \"python: \$(which python)\"
     python '$SCRIPT_DIR/merge_lowcmd_arm_sdk.py' --iface '$IFACE'
     echo '[merge exited]'
     exec bash"
 
 tmux split-window -h -t "$SESSION" "
+    source '$HOME/miniconda3/etc/profile.d/conda.sh'
+    conda activate '$CONDA_ENV'
     cd '$SIM2REAL_DIR'
     sleep 1
     echo '=== pane2: AGILE lower-body pipeline -> rt/lowcmd_rl ==='
+    echo \"python: \$(which python)\"
     python '$SCRIPT_DIR/agile_lowcmd_pipeline.py' \
         --iface '$IFACE' \
         --agile-repo '$AGILE_REPO' \
         --device '$DEVICE' \
+        --torch-threads '$TORCH_THREADS' \
         --fwd-max '$FWD_MAX' \
         --lat-max '$LAT_MAX' \
         --yaw-max '$YAW_MAX' \
@@ -96,9 +120,12 @@ tmux split-window -h -t "$SESSION" "
 
 if [[ "$WITH_KEYBOARD" == "1" ]]; then
     tmux split-window -v -t "$SESSION:0.1" "
+        source '$HOME/miniconda3/etc/profile.d/conda.sh'
+        conda activate '$CONDA_ENV'
         cd '$SIM2REAL_DIR'
         sleep 2
         echo '=== pane3: keyboard IPC control ==='
+        echo \"python: \$(which python)\"
         echo 'focus this pane for WASD/QE, z/x height, c pick-height, r stand'
         python '$SCRIPT_DIR/agile_keyboard_control.py'
         echo '[keyboard exited]'
@@ -106,11 +133,16 @@ if [[ "$WITH_KEYBOARD" == "1" ]]; then
 fi
 
 tmux split-window -v -t "$SESSION:0.0" "
+    source '$HOME/miniconda3/etc/profile.d/conda.sh'
+    conda activate '$CONDA_ENV'
     cd '$SIM2REAL_DIR'
     sleep 3
     echo '=== pane4: box_demo_main camera/VLM/SAM3/IK/arm_sdk ==='
+    echo \"python: \$(which python)\"
     python '$SCRIPT_DIR/box_demo_main.py' \
         --vlm-endpoint '$VLM_ENDPOINT' \
+        --host '$SAM3_HOST' \
+        --port '$SAM3_PORT' \
         --iface '$IFACE' \
         --walk-scale '$WALK_SCALE' \
         $NO_CONFIRM

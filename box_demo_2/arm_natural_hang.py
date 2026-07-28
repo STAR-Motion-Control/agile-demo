@@ -30,7 +30,6 @@ from unitree_sdk2py.utils.crc import CRC  # noqa: E402
 DT = 0.02
 DEFAULT_MOVE_DURATION = 3.0
 RELEASE_BLEND_DURATION = 2.5
-RELEASE_WEIGHT_FADE_DURATION = 0.35
 # merge_lowcmd_arm_sdk 默认 arm_stale_s=0.25；任何 handoff 空窗超过此值 RL 会抢回上半身
 ARM_SDK_BURST_FRAMES = 30
 _crc = CRC()
@@ -308,16 +307,8 @@ class ArmNaturalHangKeeper:
             q_final = read_policy_q(rl_cmd)
         else:
             q_final = q_start
-        # merger 对腰使用连续 weight；这里渐隐可同步混合 q/kp/kd/tau。
-        # 双臂仍按旧二值所有权工作，但 q_final 已对齐 policy，因此不改变其语义。
-        fade_t = 0.0
-        while fade_t < RELEASE_WEIGHT_FADE_DURATION:
-            if rl_cmd is not None:
-                q_final = read_policy_q(rl_cmd)
-            weight = 1.0 - smooth_ratio(fade_t / RELEASE_WEIGHT_FADE_DURATION)
-            publish_arm_sdk(self._pub, self.low_state, q_final, sdk_weight=weight)
-            time.sleep(DT)
-            fade_t += DT
+        publish_arm_sdk(self._pub, self.low_state, q_final, sdk_weight=1.0)
+        time.sleep(0.1)
         publish_arm_sdk(self._pub, self.low_state, q_final, sdk_weight=0.0)
         print("[arm_hang] 已平滑交还给 policy。")
 

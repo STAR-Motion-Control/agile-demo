@@ -65,9 +65,9 @@ def key_ready(timeout: float) -> bool:
 
 def main():
     p = argparse.ArgumentParser(description="Keyboard IPC control for AGILE box_demo_2")
-    p.add_argument("--vx", type=float, default=0.30, help="W/S speed in m/s")
-    p.add_argument("--vy", type=float, default=0.20, help="A/D speed in m/s")
-    p.add_argument("--wz", type=float, default=0.40, help="Q/E yaw rate in rad/s")
+    p.add_argument("--vx", type=float, default=0.20, help="W/S speed in m/s")
+    p.add_argument("--vy", type=float, default=0.12, help="A/D speed in m/s")
+    p.add_argument("--wz", type=float, default=0.15, help="Q/E yaw rate in rad/s")
     p.add_argument("--height-step", type=float, default=0.02, help="Z/X height increment in m")
     p.add_argument("--pick-height", type=float, default=0.55, help="C key preset height in m")
     p.add_argument("--refresh-hz", type=float, default=20.0)
