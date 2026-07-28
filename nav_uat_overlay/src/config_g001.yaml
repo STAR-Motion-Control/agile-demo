@@ -1,0 +1,32 @@
+# Compatibility-first profile for Unitree G1-001. It preserves the live
+# navigation camera, speed, visualization, and open-loop behavior while the
+# refactored runtime replaces only the base-command transport.
+defaults:
+  - config_bk
+  - _self_
+
+map_path: map/sustech_demo_g001
+
+rgbd_server:
+  launch_rgbd_server: false
+  publish_ros_topics: false
+  capture_depth: true
+  width: 640
+  height: 480
+  fps: 5
+  serial_number: "419222302306"
+  publish_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
+  visualization: false
+  subscrib_topic:
+    rgb: /camera/captured_image
+    depth: /camera/captured_depth
+
+motion_control:
+  closed_loop:
+    enable: false
+
+visualization:
+  enable_live_frames: true
+  save_replay: true

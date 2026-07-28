@@ -27,8 +27,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$CONFIG_NAME" in
-    config|config_bk) ;;
-    *) echo "--config must be config or config_bk"; exit 2 ;;
+    config|config_bk|config_g001) ;;
+    *) echo "--config must be config, config_bk, or config_g001"; exit 2 ;;
 esac
 
 if [[ ! "$NATIVE_THREADS" =~ ^[1-8]$ ]]; then

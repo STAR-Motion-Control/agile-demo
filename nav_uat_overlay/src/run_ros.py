@@ -39,8 +39,10 @@ from visualization.state_hub import VisualizationStateHub
 
 logger = logging.getLogger()
 NAV_CONFIG_NAME = os.environ.get("NAV_CONFIG_NAME", "config_bk")
-if NAV_CONFIG_NAME not in ("config", "config_bk"):
-    raise RuntimeError("NAV_CONFIG_NAME must be 'config' or 'config_bk'")
+if NAV_CONFIG_NAME not in ("config", "config_bk", "config_g001"):
+    raise RuntimeError(
+        "NAV_CONFIG_NAME must be 'config', 'config_bk', or 'config_g001'"
+    )
 
 
 def config_get(config, key, default=None):

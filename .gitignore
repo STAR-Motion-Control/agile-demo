@@ -11,6 +11,7 @@ logs/
 wandb/
 outputs/
 runs/
+test_results/
 tmp/
 *.tmp
 *.log
