@@ -148,5 +148,32 @@ def test_mover_velocity_positional_overrides_cruise(tmp_path):
     assert mover.fwd_cruise == pytest.approx(0.20)
 
 
+def test_small_lateral_uses_shorter_lateral_specific_step(monkeypatch, tmp_path):
+    mover = gm.GrootMover(
+        cmd_file=str(tmp_path / "cmd.json"),
+        refresh_hz=1000.0,
+        stop_hold_s=0.0,
+    )
+    monkeypatch.setattr(mover, "_execute_move", lambda *args, **kwargs: None)
+    plan = mover.move_left(0.05)
+    assert plan.speed == pytest.approx(0.10)
+    assert plan.duration == pytest.approx(1.0)
+    assert plan.expected == pytest.approx(0.10)
+    assert plan.floored
+
+
+def test_forward_reliability_floor_is_unchanged(monkeypatch, tmp_path):
+    mover = gm.GrootMover(
+        cmd_file=str(tmp_path / "cmd.json"),
+        refresh_hz=1000.0,
+        stop_hold_s=0.0,
+    )
+    monkeypatch.setattr(mover, "_execute_move", lambda *args, **kwargs: None)
+    plan = mover.move_forward(0.05)
+    assert plan.speed == pytest.approx(0.12)
+    assert plan.duration == pytest.approx(1.5)
+    assert plan.expected == pytest.approx(0.18)
+
+
 def test_robotmover_alias_is_grootmover():
     assert gm.RobotMover is gm.GrootMover

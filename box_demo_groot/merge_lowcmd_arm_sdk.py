@@ -4,8 +4,10 @@
 将 RoboJuDo 的 rt/lowcmd_rl 与 box_demo / dual_arm 的 rt/arm_sdk 合成为最终 rt/lowcmd。
 
 - 默认：motor 0–11 及未启用 arm_sdk 时 12–34 均来自 RL（下半身 + 其余）。
-- 当 rt/arm_sdk 中 motor_cmd[29].q > 阈值 且报文未过期：motor 12–29（腰 + 双臂 + arm_sdk 权重槽）
-  整段来自 arm_sdk（kp/kd/q 等与 box_demo 一致）。
+- 当 rt/arm_sdk 中 motor_cmd[29].q > 阈值 且报文未过期：默认沿用操控协议，
+  腰 12–14 + 双臂 15–28 来自 arm_sdk。
+- 扩展协议：motor_cmd[29].dq >= 0.5 表示 arms-only。此时仅双臂来自 arm_sdk，
+  腰在静止和运动中都逐帧保留 RL；旧操控发布者 dq=0，语义不变。
 
 [lz 2026-07-10] 腰部"运动窗口"仲裁 (--waist-to-rl-on-motion, 默认关=旧行为):
   背景: arm_natural_hang 垂臂保持 50Hz 常开地经 rt/arm_sdk 锁腰(12-14, kp250)，而
@@ -89,6 +91,9 @@ WAIST_SLEW_RAD_S = 1.5
 # 覆盖到腰上，即使该目标等于实测角，也会撤掉 RL 依靠位置误差产生的
 # 重力支撑力矩。
 DEFAULT_WAIST_TAKEOVER_BLEND_S = 0.35
+# arm_sdk enable slot (motor 29) ownership extension.  The slot is metadata,
+# not a physical actuator; q remains the official weight and dq marks arms-only.
+ARM_SDK_ARMS_ONLY_THRESHOLD = 0.5
 
 
 def _copy_motor(dst: LowCmd_, src: LowCmd_, idx: int) -> None:
@@ -375,12 +380,17 @@ class Merger:
         _copy_full(out, rl)
 
         arm_weight = 0.0
+        arms_only = False
         if arm is not None and arm_age <= self._arm_stale_s:
             raw_weight = float(arm.motor_cmd[29].q)
             if math.isfinite(raw_weight):
                 arm_weight = max(0.0, min(1.0, raw_weight))
+            raw_arms_only = float(arm.motor_cmd[29].dq)
+            if math.isfinite(raw_arms_only):
+                arms_only = raw_arms_only >= ARM_SDK_ARMS_ONLY_THRESHOLD
         use_arm = arm_weight > self._weight_threshold
-        takeover = self._update_waist_takeover(now, use_arm)
+        arm_owns_waist = use_arm and not arms_only
+        takeover = self._update_waist_takeover(now, arm_owns_waist)
 
         # 腰仲裁每 tick 都推进(与 use_arm 无关, 保持计时连续)。
         # 旗标采样超龄(看门线程死亡/未启动)→ 安全值 → 收敛 LOCKED。
@@ -396,6 +406,8 @@ class Merger:
         if use_arm:
             for i in range(OVERLAY_LO, OVERLAY_HI):
                 if WAIST_LO <= i < WAIST_HI:
+                    if arms_only:
+                        continue  # h natural-hang: waist remains exactly RL
                     # takeover=0 时保持当前 RL 命令；takeover=1 后恢复原有
                     # 运动窗口 alpha 语义。统一混合 q/kp/kd/tau，避免腰 pitch
                     # 在 RL kd=-5 与 arm kd=+5 之间瞬时翻转。
@@ -413,6 +425,10 @@ class Merger:
                         self._slew_waist(out, i, now)
                 else:
                     _copy_motor(out, arm, i)
+            if arms_only:
+                # Keep the future manipulation-waist takeover baseline aligned
+                # with the actual RL waist while h owns only the arms.
+                self._remember_waist_output(out, now)
         else:
             # 不改变 RL 输出，只把限速参考同步到真正发给电机的腰命令。
             self._remember_waist_output(out, now)

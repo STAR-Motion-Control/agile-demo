@@ -54,6 +54,7 @@ TORCH_THREADS="${TORCH_THREADS:-2}"
 FWD_MAX="${FWD_MAX:-0.50}"          # 前向速度上限 m/s (速度指标测试才要 1.3)
 LAT_MAX="${LAT_MAX:-0.30}"          # 与手动 DWBC adapter 默认一致
 YAW_MAX="${YAW_MAX:-0.60}"          # 转向角速度上限 rad/s
+LAT_CRUISE="${LAT_CRUISE:-0.20}"    # 导航离散横移/本启动器键盘横移速度 m/s
 HEIGHT_RATE="${HEIGHT_RATE:-0.20}"  # 高度变化速率上限 m/s
 # 稳走关键高度参数(= adapter 默认, 显式写出防默认漂移; sim round11 标定):
 STAND_HEIGHT="${STAND_HEIGHT:-0.76}"  # 与当前手动 DWBC 真机验证配置一致
@@ -91,6 +92,7 @@ while [[ $# -gt 0 ]]; do
         --torch-threads) TORCH_THREADS="$2"; shift 2 ;;
         --fwd-max) FWD_MAX="$2"; ADAPTER_EXTRA+=("--fwd-max" "$2"); shift 2 ;;
         --lat-max) LAT_MAX="$2"; ADAPTER_EXTRA+=("--lat-max" "$2"); shift 2 ;;
+        --lat-cruise) LAT_CRUISE="$2"; shift 2 ;;
         --yaw-max) YAW_MAX="$2"; ADAPTER_EXTRA+=("--yaw-max" "$2"); shift 2 ;;
         --height-rate) HEIGHT_RATE="$2"; ADAPTER_EXTRA+=("--height-rate" "$2"); shift 2 ;;
         --stand-height) STAND_HEIGHT="$2"; shift 2 ;;
@@ -181,6 +183,7 @@ if [[ "$PRINT_CONFIG" == "1" ]]; then
     echo "nav_warmup_speed=$WARMUP_SPEED"
     echo "waist_to_rl_on_motion=$WAIST_RL"
     echo "limits=fwd:$FWD_MAX,lat:$LAT_MAX,yaw:$YAW_MAX,height_rate:$HEIGHT_RATE"
+    echo "nav_lat_cruise=$LAT_CRUISE"
     echo "nav_runtime_config=$NAV_PROFILE_FILE"
     exit 0
 fi
@@ -224,7 +227,7 @@ fi
 # export。把两边必须一致的值原子写入 profile，motion_backend.py 启动时读取。
 python3 - "$NAV_PROFILE_FILE" "$NAV_MOTION_PROFILE" "$STAND_HEIGHT" \
     "$WALK_FLOOR" "$WARMUP_MODE" "$WARMUP_EFFECTIVE" "$WARMUP_SPEED" \
-    "$FWD_MAX" "$LAT_MAX" "$YAW_MAX" "$WAIST_RL" <<'PY'
+    "$FWD_MAX" "$LAT_MAX" "$YAW_MAX" "$LAT_CRUISE" "$WAIST_RL" <<'PY'
 import json
 import os
 import sys
@@ -242,6 +245,7 @@ import time
     fwd_max,
     lat_max,
     yaw_max,
+    lat_cruise,
     waist_rl,
 ) = sys.argv[1:]
 directory = os.path.dirname(path) or "/tmp"
@@ -259,6 +263,7 @@ payload = {
     "back_max": min(0.20, float(fwd_max)),
     "lat_max": float(lat_max),
     "yaw_max": float(yaw_max),
+    "lat_cruise": float(lat_cruise),
     "v_floor": 0.12,
     "w_floor": 0.10,
     "waist_to_rl_on_motion": waist_rl == "1",
@@ -284,6 +289,7 @@ echo "  iface/domain: $IFACE / $DOMAIN"
 echo "  conda env:    $CONDA_ENV"
 echo "  GROOT_REPO:   $GROOT_REPO"
 echo "  limits:       fwd=$FWD_MAX lat=$LAT_MAX yaw=$YAW_MAX height_rate=$HEIGHT_RATE"
+echo "  nav lateral:  cruise=$LAT_CRUISE m/s (adapter cap=$LAT_MAX m/s)"
 echo "  height:       stand=$STAND_HEIGHT walk_floor=$WALK_FLOOR (低位拒走 warmup)"
 echo "  box warm-up:  $WARMUP_MODE (${WARMUP_EFFECTIVE}s @ ${WARMUP_SPEED}m/s)"
 echo "  waist owner:  motion->RL=$WAIST_RL"
@@ -350,9 +356,9 @@ tmux split-window -v -t "$SESSION:0.0" "
     $SETUP; cd '$SCRIPT_DIR'; sleep 3
     echo '=== pane4: direct IPC keyboard (same as start_g1_onboard.sh) ==='
     echo 'w/s/a/d/q/e move, z/x height, h natural arm hang, space stop, o DAMP. Do not use during active ROS nav commands.'
-    # 统一键速(7-06): 前进0.40(后退被 adapter 硬截0.2), vy 0.25(round12), wz 0.40
+    # 横移键速与导航离散横移统一使用 LAT_CRUISE。
     python '$SCRIPT_DIR/agile_keyboard_control.py' --key-timeout 0.25 \
-        --vx 0.40 --vy 0.25 --wz 0.40 \
+        --vx 0.40 --vy '$LAT_CRUISE' --wz 0.40 \
         --iface '$IFACE' --arm-hang-duration 3.0 --arm-release-duration 2.5 \
         --stand-height '$STAND_HEIGHT' --min-height 0.30 --max-height 0.80
     echo '[keyboard exited]'; exec bash"

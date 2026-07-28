@@ -32,7 +32,7 @@ import termios
 import time
 import tty
 
-from keyboard_arm_hang import KeyboardArmHangController
+from keyboard_arm_hang import KeyboardArmHangProcess
 
 CMD_FILE = "/tmp/robojudo_ext_cmd.json"
 STAND_HEIGHT = 0.74  # match bundled Decoupled-WBC DEFAULT_BASE_HEIGHT / adapter --stand-height
@@ -117,7 +117,7 @@ def main():
     arm_status = "disabled"
     if not args.disable_arm_hang_key:
         try:
-            arm_hang = KeyboardArmHangController(
+            arm_hang = KeyboardArmHangProcess(
                 args.iface,
                 move_duration=args.arm_hang_duration,
                 release_duration=args.arm_release_duration,

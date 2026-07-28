@@ -72,14 +72,18 @@ class RemoteMover(GrootMover):
         self._log("[WARN] HTTP motion/recovery wait timed out")
 
     def _wait_for_recovery(self) -> None:
-        deadline = time.monotonic() + 3.0
+        deadline = time.monotonic() + 6.0
         while time.monotonic() < deadline:
             status = self._get("/status")
             taptap = status.get("taptap", {}) if isinstance(status, dict) else {}
+            if taptap.get("blocked", False) and not taptap.get("stale", False):
+                raise RuntimeError(
+                    "taptap stance recovery failed; navigation remains blocked"
+                )
             if not taptap.get("active", False):
                 return
             time.sleep(0.05)
-        self._log("[WARN] taptap recovery wait timed out")
+        raise RuntimeError("taptap stance recovery timed out")
 
     # --------- override the low-level primitives: the server holds each phase
     def _hold(self, forward: float, lateral: float, yaw: float,

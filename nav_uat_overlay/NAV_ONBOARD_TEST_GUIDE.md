@@ -102,7 +102,7 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 
 两种 profile 都继承启动脚本的 warm-up 配置，当前默认关闭。`keyboard` 只关闭
 `min_duration/min_distance` 对导航距离/角度的改写，使 `/nav/forward_cmd`、
-`/nav/rotate_cmd` 和 `/planned_action` 在主运动段使用 `0.40/0.20/0.25/0.40` 这组巡航速度。
+`/nav/rotate_cmd` 和 `/planned_action` 在主运动段使用 `0.40/0.20/0.20/0.40` 这组巡航速度。
 
 这个脚本只启动：
 
@@ -116,7 +116,7 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 直接 IPC 键盘在 tmux pane4，键位和 `start_g1_onboard.sh dwbc` 的操控+运控键盘一致：
 
 - `w/s`：前进/后退，键盘写入 `+0.40/-0.40 m/s`，adapter 会把后退夹到安全上限 `0.20 m/s`。
-- `a/d`：左/右横移，导航启动器传参为 `0.25 m/s`。
+- `a/d`：左/右横移，导航启动器传参为 `0.20 m/s`。
 - `q/e`：左/右转向，导航启动器传参为 `0.40 rad/s`。
 - `z/x`：高度下降/上升。
 - `space`：速度归零，GR00T 继续保持平衡。
@@ -129,7 +129,7 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 - 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r`；现场只保留 `space` 和 `o` 作为人工安全入口。
 
 ROS 导航信号和 HTTP bridge 使用同一组巡航速度：前进 `0.40 m/s`、后退
-`0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`。adapter 上限为
+`0.20 m/s`、横移 `0.20 m/s`、转向 `0.40 rad/s`。adapter 上限为
 `0.50/0.20/0.30/0.60`，统一站高 `0.76 m`。实际执行 profile 由
 `start_g1_onboard_nav.sh --nav-motion-profile` 决定：
 
@@ -217,7 +217,7 @@ motion_backend:
   stand_height: 0.76
   fwd_cruise: 0.40
   back_cruise: 0.20
-  lat_cruise: 0.25
+  lat_cruise: 0.20
   yaw_cruise: 0.40
   min_duration: 1.5
   min_distance: 0.08

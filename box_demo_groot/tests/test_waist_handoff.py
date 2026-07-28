@@ -81,7 +81,13 @@ def load_merger():
 M = load_merger()
 
 
-def make_cmd(waist_q: float, waist_kd: float, *, arm_enable: float) -> LowCmd:
+def make_cmd(
+    waist_q: float,
+    waist_kd: float,
+    *,
+    arm_enable: float,
+    arms_only: bool = False,
+) -> LowCmd:
     cmd = LowCmd()
     for i, motor in enumerate(cmd.motor_cmd):
         motor.q = 0.01 * i
@@ -93,6 +99,7 @@ def make_cmd(waist_q: float, waist_kd: float, *, arm_enable: float) -> LowCmd:
         cmd.motor_cmd[i].kd = waist_kd
     cmd.motor_cmd[15].q = 1.2
     cmd.motor_cmd[29].q = arm_enable
+    cmd.motor_cmd[29].dq = 1.0 if arms_only else 0.0
     return cmd
 
 
@@ -174,6 +181,27 @@ def test_motion_window_still_keeps_waist_on_rl_while_arms_use_arm_sdk():
     assert out.motor_cmd[14].q == 0.06
     assert out.motor_cmd[14].kd == -5.0
     assert out.motor_cmd[15].q == 1.2
+
+
+def test_arms_only_overlay_never_takes_waist_even_without_motion_arbiter():
+    clock = [350.0]
+    M.time.monotonic = lambda: clock[0]
+    merger = make_merger(clock, waist_arbiter=False)
+    merger._rl = make_cmd(0.07, -5.0, arm_enable=0.0)
+    merger._arm = make_cmd(
+        0.50,
+        5.0,
+        arm_enable=1.0,
+        arms_only=True,
+    )
+
+    for _ in range(12):
+        out = tick(merger, clock, dt=0.05)
+        assert out.motor_cmd[14].q == 0.07
+        assert out.motor_cmd[14].kd == -5.0
+        assert out.motor_cmd[15].q == 1.2
+    assert merger._waist_takeover_alpha == 0.0
+    assert merger._waist_slew[14][0] == 0.07
 
 
 def test_arm_release_remains_immediate_rl_and_seeds_next_takeover_from_rl():

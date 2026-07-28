@@ -27,6 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from adaptive_taptap import AdaptiveTapTapController, StanceMetrics
 
 CMD_FILE = "/tmp/robojudo_ext_cmd.json"
@@ -50,10 +52,82 @@ WALK_THRESHOLD_NOMOVE = 0.05
 TOTAL_HG_MOTORS = 35
 BODY_MOTORS = 29
 ARM_SDK_ENABLE_SLOT = 29
+ARM_SDK_ARMS_ONLY_THRESHOLD = 0.5
+KEYBOARD_ARM_OWNER_MARKER = 0x4B48
+DEFAULT_ARM_OVERLAY_STALE_S = 0.25
 
 TOTAL_HG_MOTORS = 35
 BODY_MOTORS = 29
 ARM_SDK_ENABLE_SLOT = 29
+
+
+def neutralize_arm_observation(
+    observation: dict[str, Any],
+    arm_indices,
+    default_arm_q,
+    ratio: float = 1.0,
+) -> dict[str, Any]:
+    """Return a policy-only observation blended toward its trained arm pose.
+
+    The measured observation remains untouched for safety/telemetry.  This is
+    used only while the keyboard H overlay owns the arms: the ONNX policy then
+    reduces the second lower-body compensation for an arm pose imposed outside
+    the policy, while retaining the arm feedback needed for physical balance.
+    """
+    blend = clamp(float(ratio), 0.0, 1.0)
+    policy_observation = dict(observation)
+    q = np.array(observation["q"], copy=True)
+    dq = np.array(observation["dq"], copy=True)
+    default_q = np.asarray(default_arm_q, dtype=q.dtype)
+    if blend >= 1.0:
+        q[arm_indices] = default_q
+        dq[arm_indices] = 0.0
+    elif blend > 0.0:
+        q[arm_indices] += blend * (default_q - q[arm_indices])
+        dq[arm_indices] *= 1.0 - blend
+    policy_observation["q"] = q
+    policy_observation["dq"] = dq
+    return policy_observation
+
+
+class KeyboardArmOverlayMonitor:
+    """Track fresh keyboard-H ownership without initializing DDS a second time."""
+
+    def __init__(self, stale_s: float = DEFAULT_ARM_OVERLAY_STALE_S):
+        self.stale_s = max(0.0, float(stale_s))
+        self._sample = (0.0, 0.0, 0.0, 0)
+        self._subscriber = None
+
+    def start(self) -> None:
+        from unitree_sdk2py.core.channel import ChannelSubscriber
+        from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_
+
+        self._subscriber = ChannelSubscriber("rt/arm_sdk", LowCmd_)
+        self._subscriber.Init(self._on_arm_sdk, 10)
+
+    def _on_arm_sdk(self, msg) -> None:
+        try:
+            enable = msg.motor_cmd[ARM_SDK_ENABLE_SLOT]
+            weight = float(enable.q)
+            arms_only = float(enable.dq)
+            owner = int(enable.reserve)
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return
+        if not (math.isfinite(weight) and math.isfinite(arms_only)):
+            return
+        # Tuple assignment is atomic under CPython, so the 50 Hz control loop
+        # never waits on a DDS callback lock.
+        self._sample = (time.monotonic(), weight, arms_only, owner)
+
+    def active(self, now: float | None = None) -> bool:
+        sample_t, weight, arms_only, owner = self._sample
+        current_t = time.monotonic() if now is None else float(now)
+        return (
+            current_t - sample_t <= self.stale_s
+            and weight > 1e-3
+            and arms_only >= ARM_SDK_ARMS_ONLY_THRESHOLD
+            and owner == KEYBOARD_ARM_OWNER_MARKER
+        )
 
 
 @dataclass
@@ -85,6 +159,10 @@ def write_taptap_status(
         "enabled": bool(enabled),
         "state": controller.state if enabled else controller.IDLE,
         "active": bool(enabled and controller.state != controller.IDLE),
+        "blocked": bool(enabled and controller.state == controller.BLOCKED),
+        "navigation_min_width": controller.navigation_min_width,
+        "navigation_release_width": controller.navigation_release_width,
+        "recovery_attempt": controller.recovery_attempts,
         "event": event,
         "timestamp": time.time(),
     }
@@ -450,6 +528,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="仅已确认初始站姿正常时手动启用自动标定")
     p.add_argument("--taptap-width-margin", type=float, default=0.035,
                    help="实际足间距比标准值窄超过该值时触发回正 m")
+    p.add_argument("--taptap-navigation-min-width", type=float, default=0.18,
+                   help="导航横移的双支撑足宽触发门限 m；低于该值先暂停、"
+                        "回正并复测，不在摆动期判断")
+    p.add_argument("--taptap-navigation-release-width", type=float, default=0.19,
+                   help="导航横移足宽恢复后的放行门限 m，需不小于触发门限")
+    p.add_argument("--taptap-navigation-lateral-min-speed", type=float, default=0.08,
+                   help="仅当横向速度绝对值达到该值时启用导航足宽保护 m/s")
+    p.add_argument("--taptap-navigation-guard-confirm-s", type=float, default=0.06,
+                   help="有效双支撑足宽持续低于门限多久才触发，过滤单帧噪声 s")
     p.add_argument("--taptap-stagger-limit", type=float, default=0.08,
                    help="双脚前后错位触发阈值 m")
     p.add_argument("--taptap-yaw-limit", type=float, default=0.12,
@@ -462,6 +549,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="自适应回正前后对称踏步速度 m/s")
     p.add_argument("--taptap-adaptive-s", type=float, default=1.60,
                    help="自适应回正持续时间 s")
+    p.add_argument("--taptap-max-recovery-attempts", type=int, default=2,
+                   help="回正后复测仍异常时最多重试次数；耗尽后保持零速阻断导航")
     p.add_argument("--safety-trip-ticks", type=int, default=3,
                    help="关节安全违规需连续 N 帧(50Hz)才触发停机。GR00T 原版单帧"
                         "sys.exit — 7-07 实测后退落地冲击在下垂手臂激起单帧肘部 dq"
@@ -501,6 +590,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--dry-run", action="store_true", help="compute policy but do not publish rt/lowcmd_rl")
     p.add_argument("--no-auto-activate-policy", action="store_true", help="leave WBC lower policy in current-q hold mode")
     p.add_argument("--disable-joint-safety", action="store_true", help="skip GR00T JointSafetyMonitor before publishing")
+    p.add_argument("--disable-h-arm-observation-neutralization", action="store_true",
+                   help="禁用 H 双臂覆盖期间的策略手臂观测中和（仅用于 A/B 诊断）")
+    p.add_argument("--arm-overlay-stale-s", type=float, default=DEFAULT_ARM_OVERLAY_STALE_S,
+                   help="rt/arm_sdk 的 H 所有权报文超过此时长后停止观测中和")
+    p.add_argument("--h-arm-observation-compensation", type=float, default=0.0,
+                   help="H 期间手臂观测向训练默认姿态回退的比例 0..1；"
+                        "真机默认 0 使用真实 q/dq，非零值仅用于显式 A/B 诊断")
     p.add_argument("--print-every-s", type=float, default=1.0)
     p.add_argument("--log-pose", type=Path, default=None,
                    help="append sim ground-truth floating_base_pose to a CSV each "
@@ -518,9 +614,7 @@ def main() -> None:
 
     _load_ddsc()
 
-    import numpy as np
     import torch
-    from unitree_sdk2py.core.channel import ChannelFactoryInitialize
 
     torch.set_num_threads(max(1, int(args.torch_threads)))
 
@@ -578,6 +672,19 @@ def main() -> None:
         _activate_policy_once(wbc_policy)
 
     publisher = LowCmdRlPublisher(wbc_config=wbc_config, topic=args.publish_topic)
+    arm_indices = np.asarray(robot_model.get_joint_group_indices("arms"), dtype=int)
+    default_arm_q = np.asarray(robot_model.get_default_body_pose())[arm_indices]
+    arm_observation_compensation = clamp(
+        float(args.h_arm_observation_compensation), 0.0, 1.0
+    )
+    arm_observation_compensation_enabled = (
+        arm_observation_compensation > 0.0
+        and not args.disable_h_arm_observation_neutralization
+    )
+    arm_overlay_monitor = KeyboardArmOverlayMonitor(args.arm_overlay_stale_s)
+    if arm_observation_compensation_enabled:
+        arm_overlay_monitor.start()
+    arm_observation_neutralized = False
 
     if float(args.fwd_max) > FWD_VX_HARD:
         print(f"[WARN] --fwd-max {args.fwd_max:.2f} 超前进硬顶, 压回 {FWD_VX_HARD:.2f} m/s")
@@ -638,6 +745,11 @@ def main() -> None:
         recovery_speed=args.taptap_adaptive_speed,
         phase_s=args.taptap_period_s,
         auto_calibrate=args.taptap_auto_calibrate,
+        navigation_min_width=args.taptap_navigation_min_width,
+        navigation_release_width=args.taptap_navigation_release_width,
+        navigation_lateral_min_speed=args.taptap_navigation_lateral_min_speed,
+        navigation_guard_confirm_s=args.taptap_navigation_guard_confirm_s,
+        max_recovery_attempts=args.taptap_max_recovery_attempts,
     )
     last_stance = None
     adaptive_enabled = bool(args.taptap and args.taptap_recovery == "adaptive")
@@ -687,6 +799,11 @@ def main() -> None:
     if float(args.walk_height_floor) > 0.0:
         print(f"  walk-floor:  {args.walk_height_floor:.2f}m (低位拒走/恢复中warmup拦速度)")
     print(f"  policy:      {'auto-activated' if not args.no_auto_activate_policy else 'current-q hold'}")
+    print("  H arm obs:   "
+          + ("raw measured q/dq"
+             if not arm_observation_compensation_enabled
+             else f"{arm_observation_compensation:.2f} compensation toward policy "
+                  "default while keyboard H owns arms (A/B diagnostic)"))
     print("  merger:      keep merge_lowcmd_arm_sdk.py running to publish final rt/lowcmd")
     print("=" * 72)
 
@@ -705,6 +822,10 @@ def main() -> None:
                 yaw_max=yaw_max_eff,
                 min_height=float(args.min_height),
                 max_height=float(args.max_height),
+            )
+            h_overlay_active = (
+                arm_observation_compensation_enabled
+                and arm_overlay_monitor.active()
             )
             # 行走高度地板(warmup): 低位不走, 恢复到位才放行速度
             # (必须在 taptap 之前: 被 GATE 拦下的"假运动"不算运动, 蹲位不误触发回正)
@@ -790,7 +911,9 @@ def main() -> None:
                             print("[TAPTAP] 回正完成")
             elif args.taptap and args.taptap_recovery == "adaptive":
                 cmd, tap_active, tap_event = adaptive_taptap.update(
-                    time.monotonic(), cmd, last_stance
+                    time.monotonic(),
+                    cmd,
+                    last_stance,
                 )
                 now_status = time.monotonic()
                 if tap_event is not None or now_status - last_taptap_status_write >= 0.10:
@@ -808,16 +931,29 @@ def main() -> None:
                           f"stagger={last_stance.stagger:.3f}m "
                           f"foot_yaw={last_stance.yaw_error:.3f}rad "
                           f"reference={adaptive_taptap.reference_width:.3f}m)")
+                elif tap_event == "retry_started":
+                    print(f"[TAPTAP] 回正复测仍异常, 开始第 "
+                          f"{adaptive_taptap.recovery_attempts} 次回正")
+                elif tap_event == "navigation_guard":
+                    print(f"[TAPTAP] 导航中足宽接近下限, 暂停运动并复测 "
+                          f"(width={last_stance.width:.3f}m "
+                          f"trigger={adaptive_taptap.navigation_min_width:.3f}m "
+                          f"release={adaptive_taptap.navigation_release_width:.3f}m)")
                 elif tap_event == "checking_initial":
                     print("[TAPTAP] 初始站姿异常, 拦住首条运动并检查回正")
                 elif tap_event == "healthy":
                     print(f"[TAPTAP] 站姿正常, 跳过回正 "
                           f"(reference={adaptive_taptap.reference_width:.3f}m)")
+                elif tap_event == "waiting_stance":
+                    print("[TAPTAP] 双脚仍在摆动/无有效站姿样本，保持零速并继续复测")
+                elif tap_event == "verifying":
+                    print("[TAPTAP] 回正动作结束，保持零速并重新测量双支撑站姿")
                 elif tap_event == "completed":
-                    print("[TAPTAP] 自适应回正完成")
+                    print("[TAPTAP] 复测通过，自适应回正完成并恢复导航")
+                elif tap_event == "blocked":
+                    print("[TAPTAP] 回正复测仍失败，保持零速并阻断导航")
                 elif tap_event == "cancelled":
                     print("[TAPTAP] 安全/状态命令中断回正")
-
             height_cmd = approach(
                 height_cmd,
                 float(args.stand_height) if tap_active else cmd.height,
@@ -859,6 +995,24 @@ def main() -> None:
                 obs = dict(obs)
                 obs["q"] = q_comp
 
+            neutralize_h_arm_observation = (
+                h_overlay_active
+            )
+            if neutralize_h_arm_observation:
+                policy_obs = neutralize_arm_observation(
+                    obs,
+                    arm_indices,
+                    default_arm_q,
+                    ratio=arm_observation_compensation,
+                )
+            else:
+                policy_obs = obs
+            if neutralize_h_arm_observation != arm_observation_neutralized:
+                state = "ON" if neutralize_h_arm_observation else "OFF"
+                print(f"[H-ARM-OBS] {state}: policy arm observation "
+                      f"{f'uses {arm_observation_compensation:.2f} compensation' if neutralize_h_arm_observation else 'uses measured joints'}")
+                arm_observation_neutralized = neutralize_h_arm_observation
+
             if pose_log is not None:
                 try:
                     p7 = obs["floating_base_pose"]
@@ -889,7 +1043,7 @@ def main() -> None:
                     publisher.publish_damping(low_state, args.damping_kd)
             else:
                 t_now = time.monotonic()
-                wbc_policy.set_observation(obs)
+                wbc_policy.set_observation(policy_obs)
                 goal = {
                     "navigate_cmd": np.array([cmd.vx, cmd.vy, cmd.wz], dtype=np.float32),
                     "base_height_command": np.array([height_cmd], dtype=np.float32),

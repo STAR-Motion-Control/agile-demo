@@ -102,7 +102,7 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 
 两种 profile 都继承启动脚本的 warm-up 配置，当前默认关闭。`keyboard` 只关闭
 `min_duration/min_distance` 对导航距离/角度的改写，使 `/nav/forward_cmd`、
-`/nav/rotate_cmd` 和 `/planned_action` 在主运动段使用 `0.40/0.20/0.25/0.40` 这组巡航速度。
+`/nav/rotate_cmd` 和 `/planned_action` 在主运动段使用 `0.40/0.20/0.20/0.40` 这组巡航速度。
 
 这个脚本只启动：
 
@@ -116,10 +116,12 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 直接 IPC 键盘在 tmux pane4，键位和 `start_g1_onboard.sh dwbc` 的操控+运控键盘一致：
 
 - `w/s`：前进/后退，键盘写入 `+0.40/-0.40 m/s`，adapter 会把后退夹到安全上限 `0.20 m/s`。
-- `a/d`：左/右横移，导航启动器传参为 `0.25 m/s`。
+- `a/d`：左/右横移，导航启动器传参为 `0.20 m/s`。
 - `q/e`：左/右转向，导航启动器传参为 `0.40 rad/s`。
 - `z/x`：高度下降/上升。
-- `h`：先停止底座，再用 3 秒平滑过渡到双臂自然下垂；再次按下用
+- `h`：先停止底座，再用 3 秒平滑过渡到双臂自然下垂；双肩 pitch 固定为
+  `0.05 rad`，其余下垂关节角不变。它只接管双臂，腰始终由运控逐帧控制。
+  再次按下用
   2.5 秒对齐实时 policy 后释放。检测到其他 `arm_sdk` 发布者时拒绝接管。
 - `space`：速度归零，GR00T 继续保持平衡。
 - `o`：DAMP 阻尼急停；adapter 以当前关节位置为目标，对全身命令 `dq=0`、`kp=0`、`kd=damping`。
@@ -131,7 +133,7 @@ bash start_g1_onboard_nav.sh --nav-motion-profile keyboard
 - 正式导航时，不要按 `w/s/a/d/q/e/z/x/c/r/h`；现场只保留 `space` 和 `o` 作为人工安全入口。
 
 ROS 导航信号和 HTTP bridge 使用同一组巡航速度：前进 `0.40 m/s`、后退
-`0.20 m/s`、横移 `0.25 m/s`、转向 `0.40 rad/s`。adapter 上限为
+`0.20 m/s`、横移 `0.20 m/s`、转向 `0.40 rad/s`。adapter 上限为
 `0.50/0.20/0.30/0.60`，统一站高 `0.76 m`。实际执行 profile 由
 `start_g1_onboard_nav.sh --nav-motion-profile` 决定：
 
@@ -167,7 +169,8 @@ mover 原有 `0.4 s` 停止保持内完成，不增加普通路径等待。只�
 `/tmp/groot_taptap_status.json` 发布检查/回正状态，HTTP `/status` 同步返回该状态。回正期间 HTTP
 动作计时暂停，mover 只在状态仍为 active 时条件等待，因此首条导航距离不会被回正时间吞掉，健康路径也不会
 固定多等 `1.8 s`。`DAMP`、急停或显式不允许回正的新命令会立即取消回正；状态文件超过 `1 s` 未刷新按失效
-处理，避免旧状态永久阻塞。
+处理，避免旧状态永久阻塞。若确认窗内双脚高度差仍超限、暂时没有有效双支撑样本，adapter 会保持零速并
+继续复测，不会把 `no_stance` 当成健康结果放行待执行命令。
 
 键盘和导航使用同一个几何判据，但“动作结束”边界不同。键盘 `space` 是一次完整手动动作结束；导航中
 单个 `rotate/forward` 原语及连续 HTTP hold 到期只写 `defer_recovery=true`，保持 Balance 但不回正。
@@ -219,7 +222,7 @@ motion_backend:
   stand_height: 0.76
   fwd_cruise: 0.40
   back_cruise: 0.20
-  lat_cruise: 0.25
+  lat_cruise: 0.20
   yaw_cruise: 0.40
   min_duration: 1.5
   min_distance: 0.08

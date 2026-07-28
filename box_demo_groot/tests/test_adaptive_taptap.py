@@ -56,6 +56,35 @@ def test_healthy_stop_skips_recovery():
     assert not active and event == "healthy" and out.vx == 0.0
 
 
+def test_missing_double_support_sample_stays_zero_until_stance_is_valid():
+    c = controller()
+    arm_stop(c, BAD)
+    swinging = StanceMetrics(
+        width=BAD.width,
+        stagger=BAD.stagger,
+        height_delta=c.max_height_delta + 0.01,
+    )
+    out, active, event = c.update(
+        0.41, Cmd(vy=0.2, allow_recovery=True), swinging
+    )
+    assert not active and event == "waiting_stance"
+    assert (out.vx, out.vy, out.wz) == (0.0, 0.0, 0.0)
+    assert c.state == c.SETTLING
+
+    out, active, event = c.update(
+        0.51, Cmd(vy=0.2, allow_recovery=True), swinging
+    )
+    assert not active and event is None
+    assert (out.vx, out.vy, out.wz) == (0.0, 0.0, 0.0)
+    assert c.state == c.SETTLING
+
+    out, active, event = c.update(
+        0.61, Cmd(vy=0.2, allow_recovery=True), BAD
+    )
+    assert active and event == "started"
+    assert (out.vx, out.vy, out.wz) == (0.0, 0.0, 0.0)
+
+
 def test_zero_stance_calibrates_signed_reference():
     c = AdaptiveTapTapController(calibration_s=0.20, auto_calibrate=True)
     neutral = StanceMetrics(width=0.25, stagger=0.04, height_delta=0.0)
@@ -159,6 +188,75 @@ def test_new_normal_command_is_held_until_recovery_finishes():
     assert active and out.vy == 0.0
     out, active, event = c.update(1.32, pending, GOOD)
     assert not active and event == "completed" and out.vy == 0.2
+
+
+def test_navigation_width_guard_stops_only_at_valid_double_support():
+    c = controller()
+    c.update(0.0, Cmd(vy=0.2, defer_recovery=True), GOOD)
+    pending = Cmd(vy=0.2, defer_recovery=True)
+    swinging_narrow = StanceMetrics(
+        width=0.16,
+        stagger=GOOD.stagger,
+        height_delta=c.max_height_delta + 0.01,
+    )
+    out, active, event = c.update(0.10, pending, swinging_narrow)
+    assert not active and event is None and out.vy == 0.2
+
+    near_limit = StanceMetrics(width=0.179, stagger=GOOD.stagger, height_delta=0.0)
+    out, active, event = c.update(0.20, pending, near_limit)
+    assert not active and event is None and out.vy == 0.2
+    out, active, event = c.update(0.27, pending, near_limit)
+    assert not active and event == "navigation_guard"
+    assert (out.vx, out.vy, out.wz) == (0.0, 0.0, 0.0)
+
+
+def test_navigation_width_guard_rechecks_before_releasing_motion():
+    c = controller()
+    c.update(0.0, Cmd(vy=0.2, defer_recovery=True), GOOD)
+    pending = Cmd(vy=0.2, defer_recovery=True)
+    near_limit = StanceMetrics(width=0.179, stagger=GOOD.stagger, height_delta=0.0)
+    c.update(0.10, pending, near_limit)
+    c.update(0.17, pending, near_limit)
+    out, active, event = c.update(0.28, pending, near_limit)
+    assert active and event == "started" and out.vy == 0.0
+    out, active, event = c.update(1.09, pending, near_limit)
+    assert active and event == "verifying" and out.vy == 0.0
+    recovered = StanceMetrics(width=0.19, stagger=GOOD.stagger, height_delta=0.0)
+    out, active, event = c.update(1.20, pending, recovered)
+    assert not active and event == "completed" and out.vy == 0.2
+
+
+def test_navigation_stays_blocked_after_bounded_failed_recovery():
+    c = controller()
+    c.update(0.0, Cmd(vy=0.2, defer_recovery=True), GOOD)
+    pending = Cmd(vy=0.2, defer_recovery=True)
+    near_limit = StanceMetrics(width=0.179, stagger=GOOD.stagger, height_delta=0.0)
+    c.update(0.10, pending, near_limit)
+    c.update(0.17, pending, near_limit)
+    c.update(0.28, pending, near_limit)
+    c.update(1.09, pending, near_limit)
+    out, active, event = c.update(1.20, pending, near_limit)
+    assert active and event == "retry_started" and out.vy == 0.0
+    out, active, event = c.update(2.01, pending, near_limit)
+    assert active and event == "verifying" and out.vy == 0.0
+    out, active, event = c.update(2.12, pending, near_limit)
+    assert active and event == "blocked" and out.vy == 0.0
+    out, active, event = c.update(2.20, pending, GOOD)
+    assert active and event is None and out.vy == 0.0
+
+
+def test_navigation_guard_ignores_forward_turn_and_small_lateral_corrections():
+    c = controller()
+    c.update(0.0, Cmd(vx=0.4, defer_recovery=True), GOOD)
+    narrow = StanceMetrics(width=0.16, stagger=GOOD.stagger, height_delta=0.0)
+    for now, cmd in (
+        (0.10, Cmd(vx=0.4, defer_recovery=True)),
+        (0.20, Cmd(wz=0.4, defer_recovery=True)),
+        (0.30, Cmd(vy=0.07, defer_recovery=True)),
+    ):
+        out, active, event = c.update(now, cmd, narrow)
+        assert not active and event is None
+        assert (out.vx, out.vy, out.wz) == (cmd.vx, cmd.vy, cmd.wz)
 
 
 def test_navigation_primitives_defer_recovery_until_segment_finish():

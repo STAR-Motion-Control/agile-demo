@@ -63,7 +63,7 @@ motion_backend:
   stand_height: 0.74
   fwd_cruise: 0.40
   back_cruise: 0.20
-  lat_cruise: 0.25
+  lat_cruise: 0.20
   yaw_cruise: 0.40
   fwd_max: 0.50
   back_max: 0.20

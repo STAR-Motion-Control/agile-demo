@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import math
 import sys
+import threading
+import time
 from pathlib import Path
 
 
@@ -40,6 +42,113 @@ def test_target_is_exact_requested_pose():
     assert tuple(m.kp for m in output.motors) == H.TARGET_KP
     assert tuple(m.kd for m in output.motors) == H.TARGET_KD
     assert planner.state == H.ArmHangPlanner.HOLDING
+
+
+def test_hang_owns_exactly_fourteen_arm_joints_and_never_waist():
+    assert H.ARM_JOINTS == tuple(range(15, 29))
+    assert len(H.RL_LOWER_HANDOFF_Q) == 14
+    assert len(H.TARGET_KP) == 14
+    assert len(H.TARGET_KD) == 14
+    assert not {12, 13, 14}.intersection(H.ARM_JOINTS)
+
+
+def test_hang_gains_match_deployed_gr00t_dwbc_arm_impedance():
+    expected_kp = (115.0, 115.0, 46.0, 46.0, 23.0, 23.0, 23.0) * 2
+    expected_kd = (5.0, 5.0, 2.0, 2.0, 2.0, 2.0, 2.0) * 2
+    assert H.TARGET_KP == expected_kp
+    assert H.TARGET_KD == expected_kd
+
+
+def test_hang_uses_locomotion_compatible_shoulder_pitch():
+    assert H.RL_LOWER_HANDOFF_Q[0] == 0.05
+    assert H.RL_LOWER_HANDOFF_Q[7] == 0.05
+
+
+def test_state_read_never_waits_for_dds_lock():
+    controller = H.KeyboardArmHangController("unused")
+    controller._lock.acquire()
+    try:
+        started = time.monotonic()
+        assert controller.state == H.ArmHangPlanner.IDLE
+        assert time.monotonic() - started < 0.01
+    finally:
+        controller._lock.release()
+
+
+def test_toggle_fails_fast_instead_of_blocking_lower_body_keyboard():
+    controller = H.KeyboardArmHangController("unused")
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold_lock():
+        with controller._lock:
+            locked.set()
+            release.wait(timeout=1.0)
+
+    worker = threading.Thread(target=hold_lock)
+    worker.start()
+    assert locked.wait(timeout=0.2)
+    try:
+        started = time.monotonic()
+        ok, message = controller.toggle()
+        assert not ok
+        assert "腿部键盘保持可用" in message
+        assert time.monotonic() - started < 0.20
+    finally:
+        release.set()
+        worker.join(timeout=0.2)
+
+
+def test_arm_owner_callback_ignores_self_and_tracks_external_writer():
+    class Enable:
+        q = 1.0
+        reserve = H.KEYBOARD_ARM_OWNER_MARKER
+
+    class Message:
+        motor_cmd = [object() for _ in range(H.ARM_SDK_ENABLE)] + [Enable()]
+
+    controller = H.KeyboardArmHangController("unused")
+    controller._on_arm_sdk(Message())
+    assert controller._latest_external_arm_t == 0.0
+
+    Message.motor_cmd[H.ARM_SDK_ENABLE].reserve = 0
+    controller._on_arm_sdk(Message())
+    assert controller._latest_external_arm_weight == 1.0
+    assert controller._latest_external_arm_t > 0.0
+
+
+def test_stalled_arm_process_never_blocks_parent_keyboard():
+    class AliveProcess:
+        @staticmethod
+        def is_alive():
+            return True
+
+    class SilentConnection:
+        def __init__(self):
+            self.sent = []
+
+        @staticmethod
+        def poll():
+            return False
+
+        def send(self, message):
+            self.sent.append(message)
+
+    proxy = H.KeyboardArmHangProcess("unused", request_timeout=0.02)
+    proxy._process = AliveProcess()
+    proxy._connection = SilentConnection()
+    proxy._state = H.ArmHangPlanner.HOLDING
+    proxy._last_heartbeat = time.monotonic() - 1.0
+
+    started = time.monotonic()
+    assert proxy.state == "worker_stalled"
+    ok, message = proxy.toggle()
+    elapsed = time.monotonic() - started
+
+    assert not ok
+    assert "腿部键盘保持可用" in message
+    assert elapsed < 0.10
+    assert len(proxy._connection.sent) == 1
 
 
 def test_first_takeover_frame_exactly_matches_live_policy_command():

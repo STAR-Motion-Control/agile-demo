@@ -105,6 +105,9 @@ WALK_THRESHOLD = 0.05
 # 0.12, not 0.08 — a floored move actually clears MIN_DISTANCE.
 V_FLOOR = 0.12   # m/s   linear (forward / lateral)
 W_FLOOR = 0.10   # rad/s yaw (~5.7 deg/s)
+# 横移专用下限。5080 多起步相位扫描中，0.10m/s x 1.0s 实现
+# 4.1..6.3cm；旧 0.12m/s x 1.5s 会实现 8.8..12.4cm。
+LAT_V_FLOOR = 0.10
 
 # Physical caps — keep inside the adapter's conservative box-demo caps. With
 # units="agile" the adapter does NOT rescale; it only clamps to its own caps.
@@ -129,6 +132,8 @@ MIN_DURATION = 1.5   # s
 # dominated and sign-unstable. 0 disables; recommend 0.08-0.10. The
 # perceive->move->re-perceive loop converges the sub-increment remainder.
 MIN_DISTANCE = 0.08  # m
+LAT_MIN_DURATION = 1.0  # s
+LAT_MIN_DISTANCE = 0.05  # m
 # (C) warm-up pre-step: a brief roll to spin up the gait before the measured
 # move. This is the PRIMARY robustifier for the "反而后退" bug — the sim2sim test
 # (sim2sim_groot_mover.py, driving THIS module through the policy sim) shows that
@@ -277,6 +282,9 @@ class GrootMover:
                  v_floor: float = V_FLOOR, w_floor: float = W_FLOOR,
                  min_duration: float = MIN_DURATION, refresh_hz: float = REFRESH_HZ,
                  stop_hold_s: float = STOP_HOLD_S, min_distance: float = MIN_DISTANCE,
+                 lat_v_floor: float = LAT_V_FLOOR,
+                 lat_min_duration: float = LAT_MIN_DURATION,
+                 lat_min_distance: float = LAT_MIN_DISTANCE,
                  warmup_speed: float = WARMUP_SPEED, warmup_time: float = WARMUP_TIME,
                  settle_before_s: float = SETTLE_BEFORE_S,
                  walk_min_height: float = WALK_MIN_HEIGHT,
@@ -303,6 +311,9 @@ class GrootMover:
         #  (D) dist_gain     — open-loop distance compensation (1=off).
         self.min_duration = min_duration
         self.min_distance = min_distance
+        self.lat_v_floor = float(lat_v_floor)
+        self.lat_min_duration = float(lat_min_duration)
+        self.lat_min_distance = float(lat_min_distance)
         self.warmup_speed = warmup_speed
         self.warmup_time = warmup_time
         self.settle_before_s = settle_before_s
@@ -359,18 +370,22 @@ class GrootMover:
         status_file = Path(os.environ.get(
             "GROOT_TAPTAP_STATUS_FILE", "/tmp/groot_taptap_status.json"
         ))
-        deadline = time.monotonic() + 3.0
+        deadline = time.monotonic() + 6.0
         while time.monotonic() < deadline:
             try:
                 status = json.loads(status_file.read_text(encoding="utf-8"))
                 age = max(0.0, time.time() - float(status.get("timestamp", 0.0)))
+                if age <= 1.0 and bool(status.get("blocked", False)):
+                    raise RuntimeError(
+                        "taptap stance recovery failed; navigation remains blocked"
+                    )
                 active = age <= 1.0 and bool(status.get("active", False))
             except (FileNotFoundError, ValueError, TypeError, json.JSONDecodeError):
                 active = False
             if not active:
                 return
             time.sleep(0.05)
-        self._log("[WARN] taptap recovery wait timed out")
+        raise RuntimeError("taptap stance recovery timed out")
 
     def _refresh_for(self, forward: float, lateral: float, yaw: float,
                      duration: float) -> None:
@@ -410,14 +425,20 @@ class GrootMover:
         self._hold(forward, lateral, yaw, duration)
         self._settle()
 
-    def _snap_min_distance(self, distance_m: float, tag: str) -> float:
+    def _snap_min_distance(
+        self,
+        distance_m: float,
+        tag: str,
+        min_distance: float | None = None,
+    ) -> float:
         """选项B: 把过小的线性目标顶到 min_distance。太短的前进只会让步态做一个
         原地踏步/略后退的启停瞬态、没有净位移;顶到最小增量(如 5/10cm)保证真走出去。
         min_distance=0 时关闭。box_demo 的 perceive->move->re-perceive 会用更粗的步收敛。"""
         d = float(distance_m)
-        if self.min_distance > 0.0 and 1e-6 <= abs(d) < self.min_distance:
-            self._log(f"{tag} {abs(d)*100:.0f}cm < 最小增量 {self.min_distance*100:.0f}cm -> 顶到最小")
-            return math.copysign(self.min_distance, d)
+        threshold = self.min_distance if min_distance is None else float(min_distance)
+        if threshold > 0.0 and 1e-6 <= abs(d) < threshold:
+            self._log(f"{tag} {abs(d)*100:.0f}cm < 最小增量 {threshold*100:.0f}cm -> 顶到最小")
+            return math.copysign(threshold, d)
         return d
 
     # ----------------------------------------------------- RobotMover surface
@@ -447,10 +468,17 @@ class GrootMover:
 
     def move_left(self, distance_m: float) -> MotionPlan:
         """Left (+) / right (-) strafe by distance in METERS. Blocks until done."""
-        desired = self._snap_min_distance(distance_m, "strafe")
+        desired = self._snap_min_distance(
+            distance_m, "strafe", self.lat_min_distance
+        )
         commanded = desired * self.dist_gain
-        plan = solve_linear(commanded, self.lat_cruise, self.v_floor,
-                            self.lat_max, self.min_duration)
+        plan = solve_linear(
+            commanded,
+            self.lat_cruise,
+            self.lat_v_floor,
+            self.lat_max,
+            self.lat_min_duration,
+        )
         if plan.duration <= 0:
             return plan
         self._guard_walk_height()
