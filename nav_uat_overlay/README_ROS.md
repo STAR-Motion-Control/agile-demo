@@ -4,16 +4,25 @@ This document explains how to start `run_ros.py`, how to use the ROS bridge, and
 
 ## 1) Start the ROS bridge
 
-`run_ros.py` uses Hydra with `config_path="."`, so start it from the `src` directory in this worktree:
+The refactored candidate refuses direct `python run_ros.py` startup. Start it
+only through the outer launcher, which verifies the expected stream-only base
+runtime, requires explicit human approval, and then authorizes the guarded
+`run_ros.py` process:
 
 ```bash
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate nav
 source /opt/ros/humble/setup.bash
 source ~/unitree_ros2/install/setup.bash
-cd /home/unitree/workspace/nav_uat/src
-python run_ros.py
+cd /home/unitree/zihou/agile-demo-refactor
+bash nav_uat_overlay/start_nav_refactored.sh \
+  --human-approved-control-start
 ```
+
+Do not set the internal launcher authorization environment variable manually.
+Running `run_ros.py` directly intentionally exits before Hydra, ROS, camera, or
+motion-backend initialization. Use `--preflight-only` on the outer launcher for
+a non-starting readiness check.
 
 Logs are written to:
 
@@ -22,7 +31,7 @@ Logs are written to:
 
 ### Visualization console
 
-If `src/config.yaml` has `visualization.enable: true`, `run_ros.py` also starts the visualization backend.
+If the selected config has `visualization.enable: true`, `run_ros.py` also starts the visualization backend.
 
 Default URL:
 
@@ -117,9 +126,11 @@ You can also use English:
 ros2 topic pub --once /nav/text_nav std_msgs/msg/String "{data: 'go to the kitchen'}"
 ```
 
-## 4) Stop current task
+## 4) Stop current navigation task
 
-Emergency stop / cancel current action:
+This cancels the navigation task and requests zero base velocity. It is not a
+hardware emergency stop and does not replace the G1 stop mechanism or the
+motion-bus DAMP/LIMP latch.
 
 ```bash
 ros2 topic pub --once /nav/stop_cmd std_msgs/msg/Empty "{}"
@@ -130,6 +141,9 @@ ros2 topic pub --once /nav/stop_cmd std_msgs/msg/Empty "{}"
 When `lidar_safety.enable` is true, the ROS bridge monitors `/safety/lidar_state`.
 `blocked` and `stale` pause the current navigation executor and publish zero motion.
 `clear` resumes the existing navigation task without marking it stopped.
+
+This LiDAR state is independent from the motion-bus safety latch. Clearing the
+LiDAR pause cannot clear or re-arm a DAMP/LIMP epoch.
 
 Manual `/nav/forward_cmd` and `/nav/rotate_cmd` commands are rejected while the
 LiDAR safety pause is active.
@@ -220,21 +234,34 @@ comparison configuration. The selected GR00T config contains:
 
 ```yaml
 motion_backend:
-  type: groot_http_discrete
-  ipc_url: http://127.0.0.1:5001
-  box_demo_module_path: /home/unitree/zihou/box_demo_1
+  type: groot_motion_bus
+  motion_bus_socket: /tmp/groot_motion_bus.sock
+  runtime_module_path: /home/unitree/zihou/agile-demo-refactor
+  box_demo_module_path: /home/unitree/zihou/agile-demo-refactor/box_demo_groot
 ```
 
-G001 uses the onboard bridge started by:
+The candidate runtime and navigation entry points are separate and both require
+an explicit human approval flag:
 
 ```bash
-cd /home/unitree/zihou/box_demo_1
-bash start_g1_onboard_nav.sh
+cd /home/unitree/zihou/agile-demo-refactor
+bash box_demo_groot/start_g1_onboard_runtime_taptap.sh \
+  --human-approved-control-start
+bash nav_uat_overlay/start_nav_refactored.sh \
+  --human-approved-control-start
 ```
 
-`groot_http_discrete` calls the local HTTP bridge and reuses
-`RemoteMover/GrootMover` for distance/angle moves. Set `type:
-wireless_controller` to roll back to the original `/wirelesscontroller` path.
+`groot_motion_bus` sends bounded Unix datagrams with source, sequence and lease
+metadata. One broker arbitrates navigation, manipulation and operator commands,
+then sends a latest-only 20 Hz Unix datagram stream directly to the adapter and
+merger. Candidate B does not write or poll the legacy command JSON.
+`groot_http_discrete` and the JSON path remain available only for baseline
+comparisons; `wireless_controller` selects the original `/wirelesscontroller`
+path.
+
+Do not run these example commands without a person physically present and an
+explicit approval for that start. `--preflight-only` performs checks without
+creating a navigation or control process.
 
 ## 7) Check robot status
 
@@ -283,9 +310,14 @@ This gives standard ROS `PoseStamped` (position + quaternion orientation).
 
 ## 9) Quick test sequence
 
+The first command is a real control start and may only be run by the physically
+present operator after the runtime launcher has been approved and started.
+
 ```bash
-# 1) Start bridge
-bash -lic 'g1env && cd /home/unitree/workspace/nav/.worktrees/navigation-visualization/src && python run_ros.py'
+# 1) Start the guarded candidate bridge
+cd /home/unitree/zihou/agile-demo-refactor
+bash nav_uat_overlay/start_nav_refactored.sh \
+  --human-approved-control-start
 
 # 2) In another terminal: monitor status
 ros2 topic echo /nav/status
@@ -296,7 +328,7 @@ ros2 topic pub --once /nav/text_nav std_msgs/msg/String "{data: 'go to the kitch
 # 4) Query pose
 ros2 service call /nav/get_pose std_srvs/srv/Trigger "{}"
 
-# 5) Emergency stop if needed
+# 5) Cancel the navigation task if needed (not the hardware emergency stop)
 ros2 topic pub --once /nav/stop_cmd std_msgs/msg/Empty "{}"
 ```
 
@@ -311,39 +343,10 @@ ros2 topic pub --once /nav/stop_cmd std_msgs/msg/Empty "{}"
 - If Chinese text looks wrong in terminal:
   - Ensure terminal locale is UTF-8 (for example `LANG`/`LC_ALL` contains `UTF-8`).
 
-## 11) Navigation autostart service usage
+## 11) Autostart services
 
-If you want navigation to be managed as a user service (`robot_nav`), use the following steps.
-
-### 11.1 Enter the gateway script directory
-
-```bash
-cd /home/unitree/robot/gateway
-```
-
-### 11.2 Install service (only once)
-
-```bash
-cd /home/unitree/robot/gateway
-./install_robot_nav_service.sh
-```
-
-> If it is already installed, you do not need to run install again.
-
-### 11.3 Start the service
-
-```bash
-systemctl --user start robot_nav
-```
-
-### 11.4 Check service startup logs
-
-```bash
-journalctl --user-unit robot_nav -f
-```
-
-### 11.5 Check navigation runtime logs
-
-```bash
-cat /home/unitree/workspace/nav/src/log_ros.txt
-```
+The refactored candidate must not be installed as an unattended autostart
+service. Its launcher requires a fresh explicit human approval for each real
+control start, and `run_ros.py` rejects direct service startup. Any existing
+`robot_nav` user service belongs to the legacy deployment and must be disabled
+or confirmed stopped before candidate preflight.

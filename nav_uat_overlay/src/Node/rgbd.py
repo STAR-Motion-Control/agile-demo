@@ -4,12 +4,12 @@ from threading import Event, Thread
 
 import numpy as np
 import rclpy
+from camera_runtime import CaptureErrorBackoff
 from frame_hub import CameraFrameHub
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from runtime_config import config_get, resolve_capture_depth
-
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +33,7 @@ class RGBDClient(Node):
         self.pipeline = None
         self.bridge = None
         self.depth_scale = 1.0
+        self._camera_error_backoff = CaptureErrorBackoff()
 
         rgbd_cfg = cfg.rgbd_server
         self.publish_ros_topics = bool(config_get(rgbd_cfg, "publish_ros_topics", False))
@@ -130,7 +131,7 @@ class RGBDClient(Node):
         self.bridge = CvBridge()
         self.rgbd_group = MutuallyExclusiveCallbackGroup()
 
-        if self.require_depth:
+        if self.capture_depth:
             from message_filters import ApproximateTimeSynchronizer, Subscriber
 
             self.rgb_subscription = Subscriber(
@@ -186,6 +187,10 @@ class RGBDClient(Node):
                     color_frame = frames.get_color_frame()
                     depth_frame = frames.get_depth_frame() if self.capture_depth else None
                     if not color_frame or (self.capture_depth and not depth_frame):
+                        if self._wait_after_camera_failure(
+                            "Camera returned an incomplete frameset"
+                        ):
+                            break
                         continue
 
                     color_image = np.asanyarray(color_frame.get_data()).copy()
@@ -205,14 +210,22 @@ class RGBDClient(Node):
                             depth_image,
                             depth_scale=self.depth_scale,
                         )
+                    self._camera_error_backoff.reset()
                 except Exception as exc:
                     if self._stop_event.is_set():
                         break
-                    logger.error("Camera error: %s", exc)
+                    if self._wait_after_camera_failure(f"Camera error: {exc}"):
+                        break
         finally:
             if self.pipeline is not None:
                 self.pipeline.stop()
             logger.info("RealSense pipeline stopped.")
+
+    def _wait_after_camera_failure(self, message):
+        delay_s, should_log = self._camera_error_backoff.failure()
+        if should_log:
+            logger.error("%s; retrying in %.2fs", message, delay_s)
+        return self._stop_event.wait(delay_s)
 
     def _accept_frame(self, rgb_frame, depth_frame, *, source, depth_scale=1.0):
         frame = self.frame_hub.publish(

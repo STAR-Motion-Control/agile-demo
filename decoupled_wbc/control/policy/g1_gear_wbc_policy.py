@@ -1,4 +1,5 @@
 import collections
+import os
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -8,6 +9,82 @@ import torch
 
 from decoupled_wbc.control.base.policy import Policy
 from decoupled_wbc.control.utils.gear_wbc_utils import get_gravity_orientation, load_config
+
+
+_ORT_INTRA_OP_THREADS_ENV = "GROOT_ORT_INTRA_OP_THREADS"
+_ORT_INTER_OP_THREADS_ENV = "GROOT_ORT_INTER_OP_THREADS"
+_ORT_EXECUTION_MODE_ENV = "GROOT_ORT_EXECUTION_MODE"
+_ORT_ALLOW_SPINNING_ENV = "GROOT_ORT_ALLOW_SPINNING"
+_ORT_MAX_THREADS = 8
+
+
+def _read_ort_thread_count(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(raw_value)
+    except ValueError as exc:
+        raise ValueError(
+            f"{name} must be an integer between 1 and {_ORT_MAX_THREADS}; "
+            f"got {raw_value!r}"
+        ) from exc
+
+    if not 1 <= value <= _ORT_MAX_THREADS:
+        raise ValueError(
+            f"{name} must be between 1 and {_ORT_MAX_THREADS}; got {value}"
+        )
+    return value
+
+
+def _read_ort_execution_mode():
+    raw_value = os.environ.get(_ORT_EXECUTION_MODE_ENV, "sequential")
+    value = raw_value.strip().lower()
+    modes = {
+        "sequential": ort.ExecutionMode.ORT_SEQUENTIAL,
+        "parallel": ort.ExecutionMode.ORT_PARALLEL,
+    }
+    if value not in modes:
+        raise ValueError(
+            f"{_ORT_EXECUTION_MODE_ENV} must be 'sequential' or 'parallel'; "
+            f"got {raw_value!r}"
+        )
+    return modes[value]
+
+
+def _read_ort_allow_spinning() -> bool:
+    raw_value = os.environ.get(_ORT_ALLOW_SPINNING_ENV, "false")
+    value = raw_value.strip().lower()
+    if value in {"0", "false", "no", "off"}:
+        return False
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    raise ValueError(
+        f"{_ORT_ALLOW_SPINNING_ENV} must be a boolean "
+        f"(0/1, false/true, no/yes, off/on); got {raw_value!r}"
+    )
+
+
+def _create_ort_session_options():
+    """Build bounded, non-spinning ONNX Runtime options for one policy session."""
+    session_options = ort.SessionOptions()
+    session_options.intra_op_num_threads = _read_ort_thread_count(
+        _ORT_INTRA_OP_THREADS_ENV, 1
+    )
+    session_options.inter_op_num_threads = _read_ort_thread_count(
+        _ORT_INTER_OP_THREADS_ENV, 1
+    )
+    session_options.execution_mode = _read_ort_execution_mode()
+
+    allow_spinning = "1" if _read_ort_allow_spinning() else "0"
+    session_options.add_session_config_entry(
+        "session.intra_op.allow_spinning", allow_spinning
+    )
+    session_options.add_session_config_entry(
+        "session.inter_op.allow_spinning", allow_spinning
+    )
+    return session_options
 
 
 class G1GearWbcPolicy(Policy):
@@ -54,7 +131,9 @@ class G1GearWbcPolicy(Policy):
 
     def load_onnx_policy(self, model_path: str):
         print(f"Loading ONNX policy from {model_path}")
-        model = ort.InferenceSession(model_path)
+        model = ort.InferenceSession(
+            model_path, sess_options=_create_ort_session_options()
+        )
 
         def run_inference(input_tensor):
             ort_inputs = {model.get_inputs()[0].name: input_tensor.cpu().numpy()}

@@ -80,10 +80,19 @@ class StepControlClient(Node):
         self._publish_zero_motion(repeat=5)
         return True, 'success.', 'stop success.'
 
+    def shutdown(self):
+        self._stop_flag.set()
+        if self.motion_backend.enabled:
+            return self.motion_backend.shutdown()
+        self._publish_zero_motion(repeat=5)
+        return True, 'success.', 'shutdown success.'
+
     def forward(self, distance = 1.0, speed = 1.0):
         if self.motion_backend.enabled:
             self._stop_flag.clear()
-            return self.motion_backend.forward(float(distance))
+            return self.motion_backend.forward(
+                float(distance), cancel_event=self._stop_flag
+            )
 
         distance = distance*2.5
         self._stop_flag.clear()
@@ -122,7 +131,9 @@ class StepControlClient(Node):
     def shift(self, distance = 1.0, speed = 0.3):
         if self.motion_backend.enabled:
             self._stop_flag.clear()
-            return self.motion_backend.shift(float(distance))
+            return self.motion_backend.shift(
+                float(distance), cancel_event=self._stop_flag
+            )
 
         self._stop_flag.clear()
         msg = WirelessController()
@@ -162,7 +173,9 @@ class StepControlClient(Node):
     def rotate(self, angle = math.pi/2, speed = math.pi/2):
         if self.motion_backend.enabled:
             self._stop_flag.clear()
-            return self.motion_backend.rotate(float(angle))
+            return self.motion_backend.rotate(
+                float(angle), cancel_event=self._stop_flag
+            )
 
         self._stop_flag.clear()
         msg = WirelessController()

@@ -222,6 +222,13 @@ class NodeManager:
             except Exception as exc:
                 logger.debug("Action executor shutdown failed: %s", exc)
 
+        step_control = getattr(self, "step_control_client", None)
+        if step_control is not None and hasattr(step_control, "shutdown"):
+            try:
+                step_control.shutdown()
+            except Exception as exc:
+                logger.debug("Step control shutdown failed: %s", exc)
+
         rgbd_client = getattr(self, "rgbd_client", None)
         if rgbd_client is not None and hasattr(rgbd_client, "shutdown"):
             try:

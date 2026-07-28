@@ -67,12 +67,13 @@ motion_backend:
   # G001 onboard deployment: nav_uat and GR00T-WBC lower-body bridge run on
   # the robot itself. 5080 is no longer in the control path.
   # Roll back by setting this to wireless_controller.
-  type: groot_http_discrete
-  ipc_url: http://127.0.0.1:5001
-  box_demo_module_path: /home/unitree/zihou/box_demo_1
+  type: groot_motion_bus
+  motion_bus_socket: /tmp/groot_motion_bus.sock
+  runtime_module_path: ${oc.env:GROOT_REFACTOR_ROOT,/home/unitree/zihou/agile-demo-refactor}
+  box_demo_module_path: ${motion_backend.runtime_module_path}/box_demo_groot
   motion_profile: precise
   profile_file: /tmp/groot_nav_motion_profile.json
-  initialize_before_motion: true
+  initialize_before_motion: false
   http_timeout: 2.0
   stand_height: 0.74
   fwd_cruise: 0.40

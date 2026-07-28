@@ -22,17 +22,15 @@ from dual_arm_target_reach import (  # noqa: E402
     DualArmController,
     G1Joint,
     RL_LOWER_HANDOFF_Q,
+    _legacy_sdk,
 )
-from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber  # noqa: E402
-from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_  # noqa: E402
-from unitree_sdk2py.utils.crc import CRC  # noqa: E402
 
 DT = 0.02
 DEFAULT_MOVE_DURATION = 3.0
 RELEASE_BLEND_DURATION = 2.5
 # merge_lowcmd_arm_sdk 默认 arm_stale_s=0.25；任何 handoff 空窗超过此值 RL 会抢回上半身
 ARM_SDK_BURST_FRAMES = 30
-_crc = CRC()
+_legacy_crc = None
 
 
 def smooth_ratio(ratio: float) -> float:
@@ -40,7 +38,7 @@ def smooth_ratio(ratio: float) -> float:
     return 0.5 * (1.0 - math.cos(math.pi * r))
 
 
-def read_policy_q(rl_cmd: LowCmd_) -> list[float]:
+def read_policy_q(rl_cmd) -> list[float]:
     return [float(rl_cmd.motor_cmd[int(j)].q) for j in ARM_JOINTS]
 
 
@@ -50,14 +48,16 @@ def lerp_q(q_from: list, q_to: list, ratio: float) -> list:
 
 
 def publish_arm_sdk(
-    publisher: ChannelPublisher,
-    low_state: LowState_,
+    publisher,
+    low_state,
     q_cmd: list,
     sdk_weight: float = 1.0,
 ) -> None:
-    from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
-
-    low_cmd = unitree_hg_msg_dds__LowCmd_()
+    global _legacy_crc
+    sdk = _legacy_sdk()
+    if _legacy_crc is None:
+        _legacy_crc = sdk.CRC()
+    low_cmd = sdk.new_low_cmd()
     low_cmd.mode_machine = low_state.mode_machine
     low_cmd.mode_pr = low_state.mode_pr
 
@@ -92,45 +92,79 @@ def publish_arm_sdk(
         else:
             mc.kp, mc.kd = 60.0, 1.5
 
-    low_cmd.crc = _crc.Crc(low_cmd)
+    low_cmd.crc = _legacy_crc.Crc(low_cmd)
     publisher.Write(low_cmd)
 
 
 class ArmNaturalHangKeeper:
     """后台 50Hz 保持双臂自然下垂，直至 stop()。"""
 
-    def __init__(self):
-        self._pub: Optional[ChannelPublisher] = None
-        self.low_state: Optional[LowState_] = None
+    def __init__(self, arm_runtime=None):
+        self._arm_runtime = arm_runtime
+        self._runtime_state = None
+        self._pub = None
+        self.low_state = None
         self._ready = threading.Event()
         self._waist_yaw = 0.0
         self._pass_waist_from_state = False
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._supervisor_thread: Optional[threading.Thread] = None
+        self._failure: RuntimeError | None = None
 
     def _ensure_dds(self) -> None:
+        if self._arm_runtime is not None:
+            self._arm_runtime.connect()
+            self._runtime_state = self._arm_runtime.wait_state(
+                timeout_s=2.0,
+                max_age_s=0.10,
+            )
+            self._ready.set()
+            return
         if self._pub is not None:
             return
-        self._pub = ChannelPublisher("rt/arm_sdk", LowCmd_)
+        sdk = _legacy_sdk()
+        self._pub = sdk.ChannelPublisher("rt/arm_sdk", sdk.LowCmd)
         self._pub.Init()
-        sub = ChannelSubscriber("rt/lowstate", LowState_)
+        sub = sdk.ChannelSubscriber("rt/lowstate", sdk.LowState)
         sub.Init(self._on_state, 10)
         self._ready.wait(timeout=2.0)
 
-    def _on_state(self, msg: LowState_):
+    def _on_state(self, msg):
         self.low_state = msg
         if not self._ready.is_set():
             self._ready.set()
 
     def build_q(self) -> list[float]:
         q = list(RL_LOWER_HANDOFF_Q)
-        if self._pass_waist_from_state and self.low_state is not None:
-            q[14] = float(self.low_state.motor_state[int(G1Joint.WaistYaw)].q)
-            q[15] = float(self.low_state.motor_state[int(G1Joint.WaistRoll)].q)
-            q[16] = float(self.low_state.motor_state[int(G1Joint.WaistPitch)].q)
+        if self._pass_waist_from_state:
+            state_q = self._state_q(required=False)
+            if state_q is not None:
+                q[14:17] = state_q[14:17]
+            else:
+                q[14] = self._waist_yaw
         else:
             q[14] = self._waist_yaw
         return q
+
+    def _state_q(self, *, required: bool = True) -> list[float] | None:
+        if self._arm_runtime is not None:
+            state = self._arm_runtime.latest_state(max_age_s=0.10)
+            if state is None and required:
+                state = self._arm_runtime.wait_state(
+                    timeout_s=2.0,
+                    max_age_s=0.10,
+                )
+            if state is None:
+                return None
+            self._runtime_state = state
+            return list(state.q)
+        if self.low_state is None:
+            return None
+        return [
+            float(self.low_state.motor_state[int(joint)].q)
+            for joint in ARM_JOINTS
+        ]
 
     def set_waist_yaw(self, yaw: float) -> None:
         self._waist_yaw = float(yaw)
@@ -138,13 +172,21 @@ class ArmNaturalHangKeeper:
     def sync_waist_from_robot(self) -> None:
         self._ensure_dds()
         time.sleep(0.05)
-        if self.low_state is not None:
-            self._waist_yaw = float(self.low_state.motor_state[int(G1Joint.WaistYaw)].q)
+        state_q = self._state_q(required=False)
+        if state_q is not None:
+            self._waist_yaw = float(state_q[14])
 
     def set_pass_waist_from_state(self, enabled: bool) -> None:
         self._pass_waist_from_state = enabled
 
     def publish_once(self, q_cmd: Optional[list] = None) -> None:
+        if self._arm_runtime is not None:
+            self._arm_runtime.publish(
+                q_cmd or self.build_q(),
+                weight=1.0,
+                profile="manip_v1",
+            )
+            return
         if self._pub is None or self.low_state is None:
             return
         publish_arm_sdk(self._pub, self.low_state, q_cmd or self.build_q(), sdk_weight=1.0)
@@ -158,9 +200,31 @@ class ArmNaturalHangKeeper:
                 time.sleep(sleep_s)
 
     def is_running(self) -> bool:
+        if self._arm_runtime is not None:
+            return self._running and self._arm_runtime.token is not None
         return self._running and self._thread is not None and self._thread.is_alive()
 
+    def raise_if_failed(self) -> None:
+        if self._failure is not None:
+            raise self._failure
+
+    def _supervise_runtime_lease(self) -> None:
+        while self._running:
+            if self._arm_runtime.token is None:
+                detail = getattr(self._arm_runtime, "last_error", None)
+                self._failure = RuntimeError(
+                    "arm runtime lease lost while natural-hang hold was active"
+                    + (f": {detail}" if detail else "")
+                )
+                self._running = False
+                print(f"\n[arm_hang][FAULT] {self._failure}")
+                return
+            time.sleep(0.10)
+
     def _burst_publish(self, q_cmd: list, *, frames: int = ARM_SDK_BURST_FRAMES) -> None:
+        if self._arm_runtime is not None:
+            self._arm_runtime.publish(q_cmd, weight=1.0, profile="manip_v1")
+            return
         if self._pub is None or self.low_state is None:
             return
         for _ in range(frames):
@@ -168,23 +232,45 @@ class ArmNaturalHangKeeper:
             time.sleep(DT)
 
     def start_keepalive(self) -> None:
+        self.raise_if_failed()
         self._ensure_dds()
         if self.is_running():
             return
         self._running = True
+        if self._arm_runtime is not None:
+            # The client heartbeat renews the lease; the merger holds the latest
+            # frame locally, so no 50 Hz duplicate arm writer is needed.
+            self._supervisor_thread = threading.Thread(
+                target=self._supervise_runtime_lease,
+                daemon=True,
+                name="arm_hang_lease_watch",
+            )
+            self._supervisor_thread.start()
+            return
         self._thread = threading.Thread(target=self._loop, daemon=True, name="arm_hang_keep")
         self._thread.start()
 
     def stop(self) -> None:
         self._running = False
+        if self._arm_runtime is not None:
+            thread = self._supervisor_thread
+            if (
+                thread is not None
+                and thread is not threading.current_thread()
+                and thread.is_alive()
+            ):
+                thread.join(timeout=0.5)
+            self._supervisor_thread = None
+            return
         if self._thread is not None and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         self._thread = None
 
     def move_to_hang(self, duration: float = DEFAULT_MOVE_DURATION, start_keepalive: bool = True) -> None:
         self._ensure_dds()
-        assert self.low_state is not None
-        q_start = [float(self.low_state.motor_state[int(j)].q) for j in ARM_JOINTS]
+        q_start = self._state_q(required=True)
+        if q_start is None:
+            raise RuntimeError("fresh arm state is unavailable")
         target_q = self.build_q()
         print("[arm_hang] 双臂 → 自然下垂")
 
@@ -211,7 +297,7 @@ class ArmNaturalHangKeeper:
         self.sync_waist_from_robot()
         self.set_pass_waist_from_state(False)
         self._ensure_dds()
-        if self.low_state is None:
+        if self._arm_runtime is None and self.low_state is None:
             print("[arm_hang] 警告: ensure_keepalive 时 low_state 未就绪")
             return
         hold_q = list(q_cmd) if q_cmd is not None else self.build_q()
@@ -229,13 +315,12 @@ class ArmNaturalHangKeeper:
         self.sync_waist_from_robot()
         self.set_pass_waist_from_state(False)
         self._ensure_dds()
-        if self.low_state is None:
+        state_q = self._state_q(required=False)
+        if state_q is None:
             print("[arm_hang] 警告: handoff 时 low_state 未就绪")
             return
         if q_cmd is None:
-            hold_q = [
-                float(self.low_state.motor_state[int(j)].q) for j in ARM_JOINTS
-            ]
+            hold_q = state_q
         else:
             hold_q = list(q_cmd)
         print("[arm_hang] 接管 arm_sdk → 自然下垂保持")
@@ -258,6 +343,15 @@ class ArmNaturalHangKeeper:
         """平滑插值到 policy 上半身目标后再释放 arm_sdk（避免 merge 切换时突变）。"""
         self.stop()
         self._ensure_dds()
+        if self._arm_runtime is not None:
+            if q_start is None:
+                q_start = self._state_q(required=True)
+            if q_start is None:
+                raise RuntimeError("fresh arm state is unavailable")
+            self._arm_runtime.publish(q_start, weight=1.0, profile="manip_v1")
+            self._arm_runtime.release_to_policy(duration_s=duration)
+            print("[arm_hang] merger 正在平滑交还给 policy。")
+            return
         if self._pub is None or self.low_state is None:
             return
 
@@ -272,16 +366,17 @@ class ArmNaturalHangKeeper:
             publish_arm_sdk(self._pub, self.low_state, q_start, sdk_weight=1.0)
             time.sleep(DT)
 
-        rl_cmd: Optional[LowCmd_] = None
+        rl_cmd = None
         rl_ready = threading.Event()
 
-        def _on_rl(msg: LowCmd_):
+        def _on_rl(msg):
             nonlocal rl_cmd
             rl_cmd = msg
             if not rl_ready.is_set():
                 rl_ready.set()
 
-        rl_sub = ChannelSubscriber("rt/lowcmd_rl", LowCmd_)
+        sdk = _legacy_sdk()
+        rl_sub = sdk.ChannelSubscriber("rt/lowcmd_rl", sdk.LowCmd)
         rl_sub.Init(_on_rl, 10)
         deadline = time.time() + 2.0
         while not rl_ready.is_set() and time.time() < deadline:
@@ -317,6 +412,9 @@ def read_arm_q_from_state(keeper: ArmNaturalHangKeeper) -> list[float]:
     """从 lowstate 读取当前腰+双臂关节角（ARM_JOINTS 顺序）。"""
     keeper._ensure_dds()
     time.sleep(0.05)
+    if keeper._arm_runtime is not None:
+        q = keeper._state_q(required=False)
+        return q if q is not None else keeper.build_q()
     if keeper.low_state is not None:
         return [
             float(keeper.low_state.motor_state[int(j)].q) for j in ARM_JOINTS

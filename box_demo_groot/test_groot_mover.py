@@ -6,6 +6,8 @@ import json
 import math
 import os
 import tempfile
+import threading
+import time
 
 import pytest
 
@@ -177,3 +179,161 @@ def test_forward_reliability_floor_is_unchanged(monkeypatch, tmp_path):
 
 def test_robotmover_alias_is_grootmover():
     assert gm.RobotMover is gm.GrootMover
+
+
+def test_concurrent_stop_prevents_blocking_move_from_republishing_nonzero():
+    commands = []
+    command_lock = threading.Lock()
+
+    def record_command(
+        _cmd_file,
+        fsm,
+        forward=0.0,
+        lateral=0.0,
+        yaw=0.0,
+        **_kwargs,
+    ):
+        with command_lock:
+            commands.append((fsm, forward, lateral, yaw))
+
+    mover = gm.GrootMover(
+        command_sink=record_command,
+        refresh_hz=200.0,
+        stop_hold_s=0.0,
+        min_duration=1.0,
+        warmup_time=0.0,
+        verbose=False,
+    )
+    errors = []
+
+    def move():
+        try:
+            mover.move_forward(0.20)
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=move)
+    worker.start()
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        with command_lock:
+            if any(abs(command[1]) > 0.0 for command in commands):
+                break
+        time.sleep(0.002)
+
+    mover.stop()
+    with command_lock:
+        stop_return_index = len(commands)
+        assert commands[-1][1:] == (0.0, 0.0, 0.0)
+    worker.join(timeout=0.5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], gm.MotionCancelled)
+    with command_lock:
+        assert all(
+            command[1:] == (0.0, 0.0, 0.0)
+            for command in commands[stop_return_index:]
+        )
+
+
+def test_stop_cancels_auto_raise_before_any_walk_command():
+    commands = []
+    command_lock = threading.Lock()
+
+    def record_command(
+        _cmd_file,
+        fsm,
+        forward=0.0,
+        lateral=0.0,
+        yaw=0.0,
+        **kwargs,
+    ):
+        with command_lock:
+            commands.append((fsm, forward, lateral, yaw, kwargs.get("height")))
+
+    mover = gm.GrootMover(
+        command_sink=record_command,
+        stand_height=0.69,
+        walk_min_height=0.70,
+        auto_raise_for_walk=True,
+        warmup_time=0.0,
+        stop_hold_s=0.0,
+        verbose=False,
+    )
+    errors = []
+
+    def move():
+        try:
+            mover.move_forward(0.20)
+        except Exception as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=move)
+    worker.start()
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        with command_lock:
+            if any(command[4] == 0.70 for command in commands):
+                break
+        time.sleep(0.002)
+
+    mover.stop()
+    with command_lock:
+        stop_return_index = len(commands)
+    worker.join(timeout=0.5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], gm.MotionCancelled)
+    with command_lock:
+        assert all(
+            command[1:4] == (0.0, 0.0, 0.0)
+            for command in commands[stop_return_index:]
+        )
+
+
+def test_cancel_token_set_before_move_entry_suppresses_every_command():
+    commands = []
+
+    def record_command(
+        _cmd_file,
+        fsm,
+        forward=0.0,
+        lateral=0.0,
+        yaw=0.0,
+        **_kwargs,
+    ):
+        commands.append((fsm, forward, lateral, yaw))
+
+    mover = gm.GrootMover(
+        command_sink=record_command,
+        refresh_hz=200.0,
+        stop_hold_s=0.0,
+        min_duration=0.01,
+        warmup_time=0.0,
+        verbose=False,
+    )
+    cancel_token = threading.Event()
+    cancel_token.set()
+
+    with pytest.raises(gm.MotionCancelled, match="before start"):
+        mover.move_forward(0.20, cancel_event=cancel_token)
+
+    assert commands == []
+
+
+def test_cancel_token_suppresses_continuous_command_at_write_boundary():
+    commands = []
+
+    def record_command(*args, **kwargs):
+        commands.append((args, kwargs))
+
+    mover = gm.GrootMover(command_sink=record_command, verbose=False)
+    cancel_token = threading.Event()
+    cancel_token.set()
+
+    with pytest.raises(gm.MotionCancelled, match="continuous command cancelled"):
+        mover.publish_velocity(0.20, cancel_event=cancel_token)
+
+    assert commands == []

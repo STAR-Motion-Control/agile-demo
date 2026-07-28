@@ -48,9 +48,13 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import errno
+import fcntl
 import json
 import math
 import os
+import signal
+import socket
 import sys
 import threading
 import time
@@ -65,6 +69,27 @@ from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_
 from unitree_sdk2py.utils.crc import CRC
 from unitree_sdk2py.utils.thread import RecurrentThread
+
+from keyboard_arm_hang import ARM_JOINTS, ArmHangPlanner, policy_frame_from_lowcmd
+
+REFACTOR_ROOT = Path(__file__).resolve().parent.parent
+if str(REFACTOR_ROOT) not in sys.path:
+    sys.path.insert(0, str(REFACTOR_ROOT))
+
+from onboard_runtime.arm_protocol import (
+    ARM_JOINT_INDICES as MANIP_ARM_JOINTS,
+    DEFAULT_ARM_RUNTIME_SOCKET,
+    DEFAULT_ARM_RUNTIME_STATUS,
+    PROFILE_MANIP,
+    PROFILE_WAIST_LEGACY,
+    ArmFrame,
+)
+from onboard_runtime.arm_runtime_broker import ManipulationArmBroker
+from onboard_runtime.command_stream import (
+    DEFAULT_MERGER_COMMAND_SOCKET,
+    LatestCommandReceiver,
+)
+from onboard_runtime.loop_health import RuntimeHealthHeartbeat
 
 NUM_MOTORS = 35
 RESERVE_LEN = 4
@@ -91,9 +116,63 @@ WAIST_SLEW_RAD_S = 1.5
 # 覆盖到腰上，即使该目标等于实测角，也会撤掉 RL 依靠位置误差产生的
 # 重力支撑力矩。
 DEFAULT_WAIST_TAKEOVER_BLEND_S = 0.35
+DEFAULT_ARM_CONTROL_SOCKET = "/tmp/groot_arm_control.sock"
+DEFAULT_ARM_CONTROL_STATUS_FILE = "/tmp/groot_arm_control_status.json"
+DEFAULT_MERGER_HEALTH_FILE = "/tmp/groot_merger_health.json"
 # arm_sdk enable slot (motor 29) ownership extension.  The slot is metadata,
 # not a physical actuator; q remains the official weight and dq marks arms-only.
 ARM_SDK_ARMS_ONLY_THRESHOLD = 0.5
+POS_STOP_F = 2.146e9
+VEL_STOP_F = 16000.0
+DEFAULT_SAFETY_DAMPING_KD = 8.0
+DEFAULT_MAX_TICK_GAP_S = 0.060
+TICK_DEGRADED_HOLD_S = 1.0
+
+
+def _runtime_profile_gains(profile: str, joint: int) -> tuple[float, float]:
+    if profile == PROFILE_WAIST_LEGACY:
+        return (20.0, 1.5) if WAIST_LO <= joint < WAIST_HI else (40.0, 2.0)
+    if profile != PROFILE_MANIP:
+        raise ValueError(f"unsupported arm runtime profile: {profile}")
+    if WAIST_LO <= joint < WAIST_HI:
+        return 250.0, 5.0
+    if joint in (15, 22):
+        return 150.0, 10.0
+    if joint in (16, 23):
+        return 120.0, 10.0
+    if joint in (17, 24):
+        return 130.0, 10.0
+    if joint in (18, 25):
+        return 130.0, 10.0
+    if joint in (19, 20, 21, 26, 27, 28):
+        return 180.0, 10.0
+    raise ValueError(f"unsupported upper-body joint: {joint}")
+
+
+def _runtime_arm_command(
+    frame: ArmFrame,
+    *,
+    mode_machine: int,
+    mode_pr: int,
+) -> LowCmd_:
+    command = unitree_hg_msg_dds__LowCmd_()
+    command.mode_machine = int(mode_machine)
+    command.mode_pr = int(mode_pr)
+    for joint, q in zip(MANIP_ARM_JOINTS, frame.q):
+        motor = command.motor_cmd[joint]
+        motor.mode = 1
+        motor.q = float(q)
+        motor.dq = 0.0
+        motor.tau = 0.0
+        motor.kp, motor.kd = _runtime_profile_gains(frame.profile, joint)
+    enable = command.motor_cmd[29]
+    enable.mode = 1
+    enable.q = float(frame.weight)
+    enable.dq = 0.0
+    enable.tau = 0.0
+    enable.kp = 0.0
+    enable.kd = 0.0
+    return command
 
 
 def _copy_motor(dst: LowCmd_, src: LowCmd_, idx: int) -> None:
@@ -163,6 +242,41 @@ def _copy_full(dst: LowCmd_, src: LowCmd_) -> None:
         dst.reserve[i] = src.reserve[i]
 
 
+def _force_safety_frame(
+    command: LowCmd_,
+    fsm: str,
+    *,
+    state_q: tuple[float, ...] | None = None,
+    damping_kd: float = DEFAULT_SAFETY_DAMPING_KD,
+) -> None:
+    """Replace every motor field with an explicit whole-body safety command."""
+    safety_fsm = str(fsm).upper()
+    if safety_fsm not in ("DAMP", "LIMP"):
+        raise ValueError(f"unsupported safety fsm: {fsm}")
+
+    for index in range(NUM_MOTORS):
+        motor = command.motor_cmd[index]
+        motor.tau = 0.0
+        motor.kp = 0.0
+        if safety_fsm == "LIMP":
+            motor.q = 0.0 if index == 29 else POS_STOP_F
+            motor.dq = VEL_STOP_F
+            motor.kd = 0.0
+            continue
+
+        q = None
+        if state_q is not None and index < len(state_q):
+            candidate = float(state_q[index])
+            if math.isfinite(candidate) and abs(candidate) < Q_SANE_RAD:
+                q = candidate
+        if q is None:
+            candidate = float(motor.q)
+            q = candidate if math.isfinite(candidate) and abs(candidate) < Q_SANE_RAD else 0.0
+        motor.q = 0.0 if index == 29 else q
+        motor.dq = 0.0
+        motor.kd = float(damping_kd)
+
+
 def _snapshot(msg: LowCmd_) -> LowCmd_:
     out = unitree_hg_msg_dds__LowCmd_()
     _copy_full(out, msg)
@@ -170,8 +284,81 @@ def _snapshot(msg: LowCmd_) -> LowCmd_:
     return out
 
 
-def read_ipc_flags(path: str, stale_s: float, now: float | None = None) -> tuple[bool, bool]:
-    """读运控 IPC 文件 → (motion, bad)。语义对齐 adapter.read_external_command:
+def _write_arm_control_status(
+    path: str,
+    planner: ArmHangPlanner,
+    *,
+    accepted: bool = True,
+    message: str = "",
+) -> None:
+    destination = Path(path)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    payload = {
+        "schema_version": 1,
+        "timestamp": time.time(),
+        "state": planner.state,
+        "active": planner.active,
+        "accepted": bool(accepted),
+        "message": str(message),
+    }
+    try:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary.write_text(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(temporary, destination)
+    except OSError:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
+def command_runtime_flags(raw: object, fresh: bool) -> tuple[bool, bool, bool]:
+    """Return ``(motion, waist_bad, global_safety)`` for one command.
+
+    ``RL_LOWER`` closes the waist motion window but is not a global safety
+    frame. DAMP/LIMP are tracked separately because they must bypass every arm
+    and waist overlay in the final publisher.
+    """
+    try:
+        if not isinstance(raw, dict) or not fresh:
+            return False, False, False
+        fsm = str(raw.get("fsm") or "RL_FULL").upper()
+        safety = (
+            bool(raw.get("estop"))
+            or bool(raw.get("limp"))
+            or fsm in ("DAMP", "LIMP")
+        )
+        if safety or fsm != "RL_FULL":
+            return False, True, safety
+        vel = raw.get("velocity")
+        if not isinstance(vel, dict):
+            vel = {}
+        v_sum = (
+            abs(float(vel.get("forward", 0.0)))
+            + abs(float(vel.get("lateral", 0.0)))
+            + abs(float(vel.get("yaw", 0.0)))
+        )
+        eps = MOTION_EPS_AGILE if raw.get("units") == "agile" else MOTION_EPS
+        return v_sum > eps, False, False
+    except Exception:
+        return False, False, False
+
+
+def command_flags(raw: object, fresh: bool) -> tuple[bool, bool]:
+    """Compatibility wrapper returning only waist-arbiter flags."""
+    motion, bad, _safety = command_runtime_flags(raw, fresh)
+    return motion, bad
+
+
+def read_ipc_runtime_flags(
+    path: str,
+    stale_s: float,
+    now: float | None = None,
+) -> tuple[bool, bool, bool]:
+    """读运控 IPC 文件 → (motion, bad, safety)。语义对齐 adapter:
     - 文件缺失/任意损坏(非 dict JSON、字段类型错)/stale → (False, False)
       # 不能开运动窗; 已开的窗按零速计时交还 → 永远向 LOCKED 收敛
     - fresh 且 estop/limp/DAMP/LIMP/非 RL_FULL(含 RL_LOWER 抓取) → (False, True)
@@ -181,26 +368,34 @@ def read_ipc_flags(path: str, stale_s: float, now: float | None = None) -> tuple
     try:
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        if not isinstance(raw, dict):
-            return False, False
         if now is None:
             now = time.time()
-        fresh = (now - float(raw.get("timestamp", 0.0))) <= stale_s
-        if not fresh:
-            return False, False
-        fsm = str(raw.get("fsm") or "RL_FULL")
-        if bool(raw.get("estop")) or bool(raw.get("limp")) or fsm != "RL_FULL":
-            return False, True
-        vel = raw.get("velocity")
-        if not isinstance(vel, dict):
-            vel = {}
-        v_sum = (abs(float(vel.get("forward", 0.0)))
-                 + abs(float(vel.get("lateral", 0.0)))
-                 + abs(float(vel.get("yaw", 0.0))))
-        eps = MOTION_EPS_AGILE if raw.get("units") == "agile" else MOTION_EPS
-        return v_sum > eps, False
+        fresh = isinstance(raw, dict) and (
+            now - float(raw.get("timestamp", 0.0))
+        ) <= stale_s
+        return command_runtime_flags(raw, fresh)
     except Exception:
-        return False, False
+        return False, False, False
+
+
+def read_ipc_flags(path: str, stale_s: float, now: float | None = None) -> tuple[bool, bool]:
+    """Compatibility wrapper returning only waist-arbiter flags."""
+    motion, bad, _safety = read_ipc_runtime_flags(path, stale_s, now)
+    return motion, bad
+
+
+def _rl_frame_is_safety(command: LowCmd_) -> bool:
+    """Conservatively identify adapter DAMP/LIMP frames without IPC state.
+
+    Normal policy modes, including RL_LOWER, carry positive position gains.
+    Adapter DAMP/LIMP frames set ``kp=0`` on every physical motor, and a fully
+    passive frame must never receive a manipulation overlay.
+    """
+    try:
+        gains = [float(command.motor_cmd[index].kp) for index in range(29)]
+        return all(math.isfinite(gain) and gain <= 1e-6 for gain in gains)
+    except (AttributeError, IndexError, TypeError, ValueError):
+        return True
 
 
 class WaistArbiter:
@@ -282,6 +477,14 @@ class WaistArbiter:
                     self._out_fast = False
         return self.alpha
 
+    def reset(self, now: float) -> None:
+        """Drop all transition history after a global safety frame."""
+        self.state = self.LOCKED
+        self.alpha = 0.0
+        self._zero_since = None
+        self._last_t = now
+        self._out_fast = False
+
 
 class Merger:
     def __init__(
@@ -294,11 +497,21 @@ class Merger:
         waist_to_rl_on_motion: bool = False,
         waist_ipc_file: str = DEFAULT_IPC_FILE,
         waist_ipc_stale_s: float = DEFAULT_IPC_STALE_S,
+        motion_command_socket: str | None = None,
         waist_blend_in_s: float = 0.3,
         waist_blend_out_s: float = 0.4,
         waist_bad_blend_out_s: float = 0.2,
         waist_handback_delay: float = 0.8,
         waist_takeover_blend_s: float = DEFAULT_WAIST_TAKEOVER_BLEND_S,
+        arm_control_socket: str | None = DEFAULT_ARM_CONTROL_SOCKET,
+        arm_control_status_file: str = DEFAULT_ARM_CONTROL_STATUS_FILE,
+        arm_hang_move_s: float = 3.0,
+        arm_hang_release_s: float = 2.5,
+        arm_runtime_socket: str | None = DEFAULT_ARM_RUNTIME_SOCKET,
+        arm_runtime_status_file: str = DEFAULT_ARM_RUNTIME_STATUS,
+        runtime_health_file: str | None = None,
+        max_tick_gap_s: float = DEFAULT_MAX_TICK_GAP_S,
+        safety_damping_kd: float = DEFAULT_SAFETY_DAMPING_KD,
     ):
         self._iface = iface
         self._period = 1.0 / hz
@@ -315,7 +528,25 @@ class Merger:
         self._pub = None
         self._sub_rl = None
         self._sub_arm = None
+        self._sub_state = None
         self._thread: RecurrentThread | None = None
+        self._fatal_error: BaseException | None = None
+        self._last_tick_completed = time.monotonic()
+        self._last_tick_started: float | None = None
+        self._last_tick_gap_s = 0.0
+        self._max_tick_gap_s = max(self._period * 2.0, float(max_tick_gap_s))
+        self._tick_degraded_until = 0.0
+        self._tick_watchdog_s = max(0.10, self._max_tick_gap_s * 2.0)
+        self._safety_damping_kd = max(0.0, float(safety_damping_kd))
+        self._health_reporter = (
+            RuntimeHealthHeartbeat(
+                runtime_health_file,
+                component="lowcmd_merger",
+                report_hz=2.0,
+            )
+            if runtime_health_file
+            else None
+        )
         # --- 腰仲裁 ---
         self._arbiter = WaistArbiter(
             enabled=waist_to_rl_on_motion,
@@ -326,6 +557,17 @@ class Merger:
         )
         self._ipc_file = waist_ipc_file
         self._ipc_stale_s = waist_ipc_stale_s
+        self._motion_receiver = (
+            LatestCommandReceiver(motion_command_socket)
+            if motion_command_socket
+            else None
+        )
+        self._motion_stream_identity: tuple[str, int] | None = None
+        self._motion_stream_prev = False
+        self._motion_stream_fresh = False
+        self._motion_safety_active = False
+        self._motion_safety_fsm: str | None = None
+        self._motion_health_ok = False
         # (motion, bad, sample_monotonic); 元组整体替换, GIL 下读写原子。
         # 初始 ts=0 → 超龄 → (False,False), 看门线程首采样前恒锁腰。
         self._ipc_flags = (False, False, 0.0)
@@ -340,44 +582,370 @@ class Merger:
         self._waist_takeover_alpha = 0.0
         self._waist_takeover_last_t: float | None = None
         self._arm_was_active = False
+        # H-key owns no DDS objects.  The pure planner runs in this merger and
+        # reuses the rt/lowcmd_rl frame already received above.
+        self._arm_control_path = arm_control_socket
+        self._arm_control_status_file = arm_control_status_file
+        self._arm_control_sock: socket.socket | None = None
+        self._arm_control_lock_stream = None
+        self._arm_planner = ArmHangPlanner(
+            move_duration=arm_hang_move_s,
+            release_duration=arm_hang_release_s,
+        )
+        self._arm_control_sequence: dict[str, int] = {}
+        self._last_arm_planner_state = self._arm_planner.state
+        self._last_output: LowCmd_ | None = None
+        self._robot_modes = (0, 0)
+        self._state_q: tuple[float, ...] | None = None
+        self._state_t = 0.0
+        self._arm_runtime = (
+            ManipulationArmBroker(
+                socket_path=arm_runtime_socket,
+                status_file=arm_runtime_status_file,
+                max_lease_s=min(0.25, self._arm_stale_s),
+            )
+            if arm_runtime_socket
+            else None
+        )
 
     # --- DDS 回调 ---
     def _on_rl(self, msg: LowCmd_):
+        now = time.monotonic()
         with self._lock:
             self._rl = _snapshot(msg)
-            self._rl_t = time.monotonic()
+            self._rl_t = now
+        if self._arm_runtime is not None:
+            try:
+                self._arm_runtime.update_policy(
+                    tuple(
+                        float(msg.motor_cmd[index].q)
+                        for index in MANIP_ARM_JOINTS
+                    ),
+                    received_at=now,
+                )
+            except Exception:
+                pass
 
     def _on_arm(self, msg: LowCmd_):
         with self._lock:
             self._arm = _snapshot(msg)
             self._arm_t = time.monotonic()
 
+    def _on_state(self, msg) -> None:
+        now = time.monotonic()
+        try:
+            full_q = tuple(
+                float(msg.motor_state[index].q) for index in range(NUM_MOTORS)
+            )
+            if not all(math.isfinite(value) for value in full_q):
+                return
+            q = tuple(full_q[index] for index in MANIP_ARM_JOINTS)
+            tau_est = tuple(
+                float(getattr(msg.motor_state[index], "tau_est", 0.0))
+                for index in MANIP_ARM_JOINTS
+            )
+            mode_machine = int(msg.mode_machine)
+            mode_pr = int(msg.mode_pr)
+        except (AttributeError, IndexError, TypeError, ValueError):
+            return
+        self._robot_modes = (mode_machine, mode_pr)
+        self._state_q = full_q
+        self._state_t = now
+        if self._arm_runtime is not None:
+            try:
+                self._arm_runtime.update_robot_state(
+                    mode_machine=mode_machine,
+                    mode_pr=mode_pr,
+                    q=q,
+                    tau_est=tau_est,
+                    received_at=now,
+                )
+            except Exception:
+                pass
+
     # --- 腰仲裁: IPC 侧线程(免疫: 任何异常不杀线程, 失败即发布安全旗标) ---
     def _ipc_loop(self):
         prev_motion = False
         while not self._ipc_stop.wait(0.05):
             try:
-                motion, bad = read_ipc_flags(self._ipc_file, self._ipc_stale_s)
+                motion, bad, safety = read_ipc_runtime_flags(
+                    self._ipc_file,
+                    self._ipc_stale_s,
+                )
             except Exception:
-                motion, bad = False, False
+                motion, bad, safety = False, False, False
             # 连续 2 采样(~100ms)防抖才承认运动, 单帧毛刺不开窗
             eff_motion = motion and prev_motion
             prev_motion = motion
             self._ipc_flags = (eff_motion, bad, time.monotonic())
+            self._motion_stream_fresh = True
+            self._motion_safety_active = safety
+            self._motion_safety_fsm = "DAMP" if safety else None
+
+    def _update_stream_flags(self, now: float) -> None:
+        receiver = self._motion_receiver
+        if receiver is None:
+            return
+        try:
+            receiver.drain()
+            raw, fresh = receiver.latest(now=now, stale_s=self._ipc_stale_s)
+            self._motion_stream_fresh = bool(fresh and isinstance(raw, dict))
+            if not fresh or not isinstance(raw, dict):
+                self._motion_stream_prev = False
+                # Once observed, a safety command survives stream loss. Only a
+                # later fresh non-safety broker frame may release this local
+                # fail-safe latch.
+                self._motion_safety_active = self._motion_safety_fsm is not None
+                self._motion_health_ok = False
+                self._ipc_flags = (False, False, now)
+                return
+            self._motion_health_ok = bool(raw.get("motion_bus_health_ok", True))
+            identity = (
+                str(raw.get("broker_id", "")),
+                int(raw.get("broker_sequence", -1)),
+            )
+            if identity == self._motion_stream_identity:
+                return
+            self._motion_stream_identity = identity
+            motion, bad, safety = command_runtime_flags(raw, True)
+            self._motion_safety_active = safety
+            if safety:
+                fsm = str(raw.get("fsm") or "DAMP").upper()
+                self._motion_safety_fsm = (
+                    "LIMP"
+                    if bool(raw.get("limp")) or fsm == "LIMP"
+                    else "DAMP"
+                )
+            else:
+                self._motion_safety_fsm = None
+            # Debounce across two distinct broker frames, not two 500 Hz ticks.
+            effective_motion = motion and self._motion_stream_prev
+            self._motion_stream_prev = motion
+            self._ipc_flags = (effective_motion, bad, now)
+        except Exception:
+            self._motion_stream_prev = False
+            self._motion_stream_fresh = False
+            self._motion_safety_active = self._motion_safety_fsm is not None
+            self._motion_health_ok = False
+            self._ipc_flags = (False, False, now)
+
+    def _report_runtime_health(
+        self,
+        now: float,
+        *,
+        rl_age: float,
+        safety_active: bool = False,
+    ) -> None:
+        reporter = self._health_reporter
+        if reporter is None:
+            return
+        if self._pub is None:
+            healthy, reason = False, "publisher_missing"
+        elif self._rl is None:
+            healthy, reason = False, "rl_missing"
+        elif rl_age > self._rl_stale_s:
+            healthy, reason = False, "rl_stale"
+        elif now < self._tick_degraded_until:
+            healthy, reason = False, "tick_gap_high"
+        elif self._motion_receiver is not None and not self._motion_stream_fresh:
+            healthy, reason = False, "motion_stream_stale"
+        else:
+            healthy, reason = True, "healthy"
+        reporter.record(
+            healthy=healthy,
+            reason=reason,
+            now_mono=now,
+            rl_age_ms=None if self._rl is None else max(0.0, rl_age) * 1000.0,
+            motion_stream_fresh=(
+                None
+                if self._motion_receiver is None
+                else self._motion_stream_fresh
+            ),
+            safety_active=bool(safety_active),
+            tick_gap_ms=max(0.0, self._last_tick_gap_s) * 1000.0,
+            max_tick_gap_ms=self._max_tick_gap_s * 1000.0,
+            motion_health_ok=(
+                None if self._motion_receiver is None else self._motion_health_ok
+            ),
+        )
+
+    def _publish_final(self, out: LowCmd_) -> None:
+        out.crc = self._crc.Crc(out)
+        self._last_output = _snapshot(out)
+        if self._pub is not None:
+            self._pub.Write(out)
+
+    def _publish_fail_safe(self, *, attempts: int = 3) -> int:
+        """Best-effort DAMP writes when the worker or watchdog is failing."""
+        if self._pub is None:
+            return 0
+        with self._lock:
+            source = self._last_output or self._rl
+        out = unitree_hg_msg_dds__LowCmd_()
+        if source is not None:
+            _copy_full(out, source)
+        else:
+            out.mode_machine, out.mode_pr = self._robot_modes
+        state_q = (
+            self._state_q
+            if self._state_q is not None
+            and time.monotonic() - self._state_t <= self._rl_stale_s
+            else None
+        )
+        _force_safety_frame(
+            out,
+            "DAMP",
+            state_q=state_q,
+            damping_kd=self._safety_damping_kd,
+        )
+        published = 0
+        for _ in range(max(1, int(attempts))):
+            try:
+                self._publish_final(out)
+                published += 1
+            except BaseException:
+                continue
+        return published
+
+    def _tick_guarded(self) -> None:
+        started = time.monotonic()
+        if self._last_tick_started is not None:
+            self._last_tick_gap_s = max(0.0, started - self._last_tick_started)
+            if self._last_tick_gap_s > self._max_tick_gap_s:
+                self._tick_degraded_until = max(
+                    self._tick_degraded_until,
+                    started + TICK_DEGRADED_HOLD_S,
+                )
+        self._last_tick_started = started
+        try:
+            self._tick()
+        except BaseException as exc:
+            self._fatal_error = exc
+            self._publish_fail_safe()
+            if self._health_reporter is not None:
+                try:
+                    self._health_reporter.mark_stopped(
+                        f"worker_exception:{type(exc).__name__}"
+                    )
+                except OSError:
+                    pass
+            raise
+        else:
+            self._last_tick_completed = time.monotonic()
 
     def _tick(self):
         now = time.monotonic()
+        self._update_stream_flags(now)
         with self._lock:
             rl = self._rl
             rl_age = now - self._rl_t
             arm = self._arm
             arm_age = now - self._arm_t if arm is not None else 1e9
+        state_q = (
+            self._state_q
+            if self._state_q is not None
+            and now - self._state_t <= self._rl_stale_s
+            else None
+        )
 
         if rl is None or rl_age > self._rl_stale_s:
+            self._report_runtime_health(now, rl_age=rl_age)
             return
 
         out = unitree_hg_msg_dds__LowCmd_()
         _copy_full(out, rl)
+
+        requested_safety_fsm = self._motion_safety_fsm
+        safety_active = self._motion_safety_active or _rl_frame_is_safety(rl)
+        supervision_inhibit = self._motion_receiver is not None and (
+            not self._motion_stream_fresh or not self._motion_health_ok
+        )
+        timing_inhibit = now < self._tick_degraded_until
+        if safety_active or supervision_inhibit or timing_inhibit:
+            # DAMP/LIMP is the final whole-body command. Invalidate every
+            # overlay before draining requests. A lost/unhealthy command plane
+            # also inhibits overlays while preserving the adapter's zero-speed
+            # balance frame.
+            self._arbiter.reset(now)
+            self._last_logged_state = self._arbiter.state
+            self._update_waist_takeover(now, False)
+            self._waist_slew.clear()
+            self._arm_planner.emergency_release(None)
+            if self._arm_runtime is not None:
+                self._arm_runtime.activate_safety_stop()
+                self._arm_runtime.drain(
+                    now=now,
+                    external_active=False,
+                    safety_active=True,
+                )
+                self._arm_runtime.write_status(now=now)
+            self._process_arm_control(
+                now,
+                rl,
+                external_active=False,
+                safety_active=True,
+            )
+            if self._arm_planner.state != self._last_arm_planner_state:
+                self._last_arm_planner_state = self._arm_planner.state
+                message = (
+                    "base safety active"
+                    if safety_active
+                    else "base runtime supervision unhealthy"
+                )
+                self._publish_arm_control_status(message=message)
+            final_safety_fsm = requested_safety_fsm
+            if final_safety_fsm is None and (supervision_inhibit or timing_inhibit):
+                final_safety_fsm = "DAMP"
+            if final_safety_fsm is not None:
+                _force_safety_frame(
+                    out,
+                    final_safety_fsm,
+                    state_q=state_q,
+                    damping_kd=self._safety_damping_kd,
+                )
+            self._publish_final(out)
+            self._report_runtime_health(
+                now,
+                rl_age=rl_age,
+                safety_active=True,
+            )
+            return
+
+        legacy_weight = 0.0
+        if arm is not None and arm_age <= self._arm_stale_s:
+            raw_legacy_weight = float(arm.motor_cmd[29].q)
+            if math.isfinite(raw_legacy_weight):
+                legacy_weight = max(0.0, min(1.0, raw_legacy_weight))
+        legacy_active = legacy_weight > self._weight_threshold
+
+        runtime_frame = None
+        runtime_arm_active = False
+        if self._arm_runtime is not None:
+            self._arm_runtime.drain(
+                now=now,
+                external_active=legacy_active,
+                safety_active=False,
+            )
+            runtime_frame = self._arm_runtime.current_frame(
+                now=now,
+                external_active=legacy_active,
+            )
+            self._arm_runtime.write_status(now=now)
+        if runtime_frame is not None:
+            runtime_arm_active = True
+            mode_machine, mode_pr = self._robot_modes
+            arm = _runtime_arm_command(
+                runtime_frame,
+                mode_machine=mode_machine,
+                mode_pr=mode_pr,
+            )
+            arm_age = 0.0
+        elif self._arm_runtime is not None:
+            # Candidate runtime and legacy rt/arm_sdk are mutually exclusive
+            # modes. A legacy publisher appearing while the runtime socket is
+            # enabled is observed as a conflict but can never take over later.
+            arm = None
+            arm_age = 1e9
 
         arm_weight = 0.0
         arms_only = False
@@ -389,6 +957,13 @@ class Merger:
             if math.isfinite(raw_arms_only):
                 arms_only = raw_arms_only >= ARM_SDK_ARMS_ONLY_THRESHOLD
         use_arm = arm_weight > self._weight_threshold
+        self._process_arm_control(now, rl, use_arm, safety_active=False)
+        if use_arm and self._arm_planner.active:
+            self._arm_planner.emergency_release(None)
+            self._publish_arm_control_status(
+                accepted=False,
+                message="manipulation arm owner preempted integrated arm hang",
+            )
         arm_owns_waist = use_arm and not arms_only
         takeover = self._update_waist_takeover(now, arm_owns_waist)
 
@@ -411,9 +986,6 @@ class Merger:
                     # takeover=0 时保持当前 RL 命令；takeover=1 后恢复原有
                     # 运动窗口 alpha 语义。统一混合 q/kp/kd/tau，避免腰 pitch
                     # 在 RL kd=-5 与 arm kd=+5 之间瞬时翻转。
-                    # arm_weight 只用于腰，双臂仍保持既有二值所有权语义。
-                    # release_to_policy 会把 weight 平滑降到 0，从而让腰的
-                    # q/kp/kd/tau 也连续交还，避免最后一帧 kd 翻转。
                     rl_weight = 1.0 - takeover * arm_weight * (1.0 - alpha)
                     if rl_weight >= 1.0:
                         pass                                  # RL 持腰: out 已是 RL 值
@@ -424,7 +996,12 @@ class Merger:
                     if self._arbiter.enabled:
                         self._slew_waist(out, i, now)
                 else:
-                    _copy_motor(out, arm, i)
+                    if runtime_arm_active and arm_weight < 1.0:
+                        _blend_motor(out, rl, arm, i, 1.0 - arm_weight)
+                    else:
+                        # Keep the established binary semantics for the explicit
+                        # legacy A/B mode.
+                        _copy_motor(out, arm, i)
             if arms_only:
                 # Keep the future manipulation-waist takeover baseline aligned
                 # with the actual RL waist while h owns only the arms.
@@ -433,9 +1010,186 @@ class Merger:
             # 不改变 RL 输出，只把限速参考同步到真正发给电机的腰命令。
             self._remember_waist_output(out, now)
 
-        out.crc = self._crc.Crc(out)
-        if self._pub is not None:
-            self._pub.Write(out)
+        if not use_arm:
+            policy_frame = policy_frame_from_lowcmd(rl)
+            hang_frame = self._arm_planner.step(now, policy_frame)
+            if hang_frame is not None and hang_frame.weight > self._weight_threshold:
+                for joint, source in zip(ARM_JOINTS, hang_frame.motors):
+                    motor = out.motor_cmd[joint]
+                    motor.mode = source.mode
+                    motor.q = source.q
+                    motor.dq = source.dq
+                    motor.tau = source.tau
+                    motor.kp = source.kp
+                    motor.kd = source.kd
+                    motor.reserve = source.reserve
+        if self._arm_planner.state != self._last_arm_planner_state:
+            self._last_arm_planner_state = self._arm_planner.state
+            self._publish_arm_control_status(message="state changed")
+
+        self._publish_final(out)
+        self._report_runtime_health(now, rl_age=rl_age)
+
+    def _publish_arm_control_status(
+        self,
+        *,
+        accepted: bool = True,
+        message: str = "",
+    ) -> None:
+        _write_arm_control_status(
+            self._arm_control_status_file,
+            self._arm_planner,
+            accepted=accepted,
+            message=message,
+        )
+
+    def _process_arm_control(
+        self,
+        now: float,
+        rl: LowCmd_,
+        external_active: bool,
+        *,
+        safety_active: bool,
+    ) -> None:
+        sock = self._arm_control_sock
+        if sock is None:
+            return
+        while True:
+            try:
+                data, address = sock.recvfrom(4096)
+            except BlockingIOError:
+                return
+            except OSError:
+                return
+            accepted, message = False, "invalid request"
+            request_id = ""
+            source = ""
+            sequence = -1
+            try:
+                payload = json.loads(data.decode("utf-8"))
+                request_id = str(payload.get("request_id", ""))
+                source = str(payload.get("source", ""))
+                sequence = int(payload.get("sequence", -1))
+                if not source or sequence <= self._arm_control_sequence.get(source, -1):
+                    raise ValueError("stale sequence")
+                self._arm_control_sequence[source] = sequence
+                command = str(payload.get("command", "")).lower()
+                policy = policy_frame_from_lowcmd(rl)
+                if safety_active and command in ("release", "emergency_release"):
+                    self._arm_planner.emergency_release(None)
+                    accepted, message = True, "arm overlay released; base safety active"
+                elif safety_active:
+                    message = "base DAMP/LIMP safety is active"
+                elif command == "toggle":
+                    if self._arm_planner.active:
+                        accepted = self._arm_planner.release(policy, now)
+                        message = "aligning arms back to policy"
+                    elif external_active:
+                        message = "external arm_sdk owner is active"
+                    else:
+                        start_msg = self._last_output or rl
+                        accepted = self._arm_planner.activate(
+                            policy_frame_from_lowcmd(start_msg),
+                            now,
+                        )
+                        message = "moving arms to natural hang"
+                elif command == "release":
+                    if self._arm_planner.active:
+                        accepted = self._arm_planner.release(policy, now)
+                        message = "aligning arms back to policy"
+                    else:
+                        accepted, message = True, "already released"
+                elif command == "emergency_release":
+                    self._arm_planner.emergency_release(policy)
+                    accepted, message = True, "arm overlay released"
+                else:
+                    message = f"unknown command: {command}"
+            except Exception as exc:
+                message = f"request rejected: {exc}"
+            self._publish_arm_control_status(accepted=accepted, message=message)
+            if address:
+                response = {
+                    "schema_version": 1,
+                    "request_id": request_id,
+                    "source": source,
+                    "sequence": sequence,
+                    "accepted": accepted,
+                    "message": message,
+                    "state": self._arm_planner.state,
+                    "timestamp": time.time(),
+                }
+                try:
+                    sock.sendto(
+                        json.dumps(response, separators=(",", ":")).encode(),
+                        address,
+                    )
+                except OSError:
+                    pass
+
+    def _bind_arm_control(self) -> None:
+        if not self._arm_control_path or self._arm_control_sock is not None:
+            return
+        path = Path(self._arm_control_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(f"{path.name}.lock")
+        lock_stream = lock_path.open("a+")
+        try:
+            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            lock_stream.close()
+            raise RuntimeError(
+                f"arm control endpoint is already active: {path}"
+            ) from exc
+        try:
+            if path.exists():
+                probe = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+                probe.setblocking(False)
+                try:
+                    probe.sendto(b'{"command":"probe"}', str(path))
+                except OSError as exc:
+                    if exc.errno not in {
+                        errno.ENOENT,
+                        errno.ECONNREFUSED,
+                        errno.ECONNRESET,
+                    }:
+                        raise
+                else:
+                    raise RuntimeError(f"another process owns arm control: {path}")
+                finally:
+                    probe.close()
+                path.unlink(missing_ok=True)
+            sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            sock.bind(str(path))
+            os.chmod(path, 0o660)
+            sock.setblocking(False)
+        except BaseException:
+            fcntl.flock(lock_stream.fileno(), fcntl.LOCK_UN)
+            lock_stream.close()
+            raise
+        self._arm_control_lock_stream = lock_stream
+        self._arm_control_sock = sock
+        self._publish_arm_control_status(message="ready")
+
+    def _close_local_endpoints(self) -> None:
+        if self._arm_control_sock is not None:
+            self._arm_control_sock.close()
+            self._arm_control_sock = None
+        if self._arm_control_lock_stream is not None:
+            if self._arm_control_path:
+                try:
+                    Path(self._arm_control_path).unlink()
+                except FileNotFoundError:
+                    pass
+            fcntl.flock(
+                self._arm_control_lock_stream.fileno(),
+                fcntl.LOCK_UN,
+            )
+            self._arm_control_lock_stream.close()
+            self._arm_control_lock_stream = None
+        if self._arm_runtime is not None:
+            self._arm_runtime.close()
+        if self._motion_receiver is not None:
+            self._motion_receiver.close()
 
     def _update_waist_takeover(self, now: float, use_arm: bool) -> float:
         """返回 0..1 的 arm 腰接管进度；失权立即复位但不延迟回到 RL。"""
@@ -487,29 +1241,81 @@ class Merger:
         self._waist_slew[idx] = (m.q, now)
 
     def run(self):
-        ChannelFactoryInitialize(0, self._iface)
-        self._pub = ChannelPublisher("rt/lowcmd", LowCmd_)
-        self._pub.Init()
-        self._sub_rl = ChannelSubscriber("rt/lowcmd_rl", LowCmd_)
-        self._sub_rl.Init(self._on_rl, 10)
-        self._sub_arm = ChannelSubscriber("rt/arm_sdk", LowCmd_)
-        self._sub_arm.Init(self._on_arm, 10)
-        if self._arbiter.enabled:
-            self._ipc_thread = threading.Thread(target=self._ipc_loop, daemon=True,
-                                                name="waist_ipc_watch")
-            self._ipc_thread.start()
-        self._thread = RecurrentThread(
-            interval=self._period,
-            target=self._tick,
-            name="merge_lowcmd",
-        )
-        self._thread.Start()
+        previous_signal_handlers = {}
+
+        def request_signal_shutdown(signum, _frame) -> None:
+            self._publish_fail_safe(attempts=5)
+            raise KeyboardInterrupt(f"received signal {signum}")
+
+        try:
+            # Claim every local endpoint before creating a DDS participant.
+            # Any overlapping candidate instance therefore fails without
+            # replacing the running instance's socket.
+            if self._arbiter.enabled and self._motion_receiver is not None:
+                self._motion_receiver.bind()
+            if self._arm_runtime is not None:
+                self._arm_runtime.bind()
+            self._bind_arm_control()
+
+            ChannelFactoryInitialize(0, self._iface)
+            from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowState_
+
+            self._pub = ChannelPublisher("rt/lowcmd", LowCmd_)
+            self._pub.Init()
+            for signum in (signal.SIGTERM, signal.SIGHUP):
+                previous_signal_handlers[signum] = signal.getsignal(signum)
+                signal.signal(signum, request_signal_shutdown)
+            self._sub_rl = ChannelSubscriber("rt/lowcmd_rl", LowCmd_)
+            self._sub_rl.Init(self._on_rl, 10)
+            self._sub_arm = ChannelSubscriber("rt/arm_sdk", LowCmd_)
+            self._sub_arm.Init(self._on_arm, 10)
+            if self._arm_runtime is not None:
+                self._sub_state = ChannelSubscriber("rt/lowstate", LowState_)
+                self._sub_state.Init(self._on_state, 1)
+            if self._arbiter.enabled and self._motion_receiver is None:
+                self._ipc_thread = threading.Thread(
+                    target=self._ipc_loop,
+                    daemon=True,
+                    name="waist_ipc_watch",
+                )
+                self._ipc_thread.start()
+            self._thread = RecurrentThread(
+                interval=self._period,
+                target=self._tick_guarded,
+                name="merge_lowcmd",
+            )
+            self._fatal_error = None
+            self._last_tick_completed = time.monotonic()
+            self._last_tick_started = None
+            self._thread.Start()
+        except BaseException:
+            self._ipc_stop.set()
+            self._publish_fail_safe(attempts=5)
+            for signum, previous in previous_signal_handlers.items():
+                signal.signal(signum, previous)
+            self._close_local_endpoints()
+            raise
         print(
             f"merge_lowcmd_arm_sdk: iface={self._iface} 合成→rt/lowcmd  "
             f"订阅 rt/lowcmd_rl + rt/arm_sdk  周期={self._period*1000:.1f} ms"
         )
+        if self._arm_control_sock is not None:
+            print(
+                f"[ARM_HANG] integrated planner ON: {self._arm_control_path}; "
+                "no extra DDS participant"
+            )
+        if self._arm_runtime is not None:
+            print(
+                f"[ARM_RUNTIME] manipulation IPC ON: "
+                f"{self._arm_runtime.socket_path}; merger owns DDS/CRC"
+            )
         if self._arbiter.enabled:
-            print(f"[WAIST] 运动窗口腰仲裁 ON: ipc={self._ipc_file} "
+            command_source = (
+                f"stream={self._motion_receiver.socket_path}"
+                if self._motion_receiver is not None
+                else f"legacy_ipc={self._ipc_file}"
+            )
+            print(f"[WAIST] 运动窗口腰仲裁 ON: {command_source} "
                   f"(stale {self._ipc_stale_s:.2f}s)  blend_in={self._arbiter.blend_in_s:.2f}s "
                   f"blend_out={self._arbiter.blend_out_s:.2f}s "
                   f"(bad→{self._arbiter.bad_blend_out_s:.2f}s) "
@@ -525,13 +1331,34 @@ class Merger:
         print("按 Ctrl+C 退出。")
         try:
             while True:
-                time.sleep(1.0)
+                time.sleep(0.05)
+                if self._fatal_error is not None:
+                    raise RuntimeError("lowcmd merger worker failed") from self._fatal_error
+                stalled_s = time.monotonic() - self._last_tick_completed
+                if stalled_s > self._tick_watchdog_s:
+                    raise RuntimeError(
+                        f"lowcmd merger worker stalled for {stalled_s:.3f}s"
+                    )
         except KeyboardInterrupt:
             print("\n退出。")
         finally:
             self._ipc_stop.set()
+            self._publish_fail_safe(attempts=5)
             if self._thread is not None:
                 self._thread.Wait(timeout=1.0)
+            if self._health_reporter is not None:
+                try:
+                    reason = (
+                        "merger_worker_failed"
+                        if self._fatal_error is not None
+                        else "merger_stopped"
+                    )
+                    self._health_reporter.mark_stopped(reason)
+                except OSError:
+                    pass
+            for signum, previous in previous_signal_handlers.items():
+                signal.signal(signum, previous)
+            self._close_local_endpoints()
 
 
 def main():
@@ -548,6 +1375,11 @@ def main():
                    help="运控 IPC 命令文件(与 adapter --cmd-file 一致)")
     p.add_argument("--waist-ipc-stale-s", type=float, default=DEFAULT_IPC_STALE_S,
                    help="IPC 新鲜度阈值(与 adapter --cmd-stale-s 一致)")
+    p.add_argument(
+        "--motion-command-socket",
+        default=DEFAULT_MERGER_COMMAND_SOCKET,
+        help="broker 最新命令流；空字符串回退到 legacy --waist-ipc-file",
+    )
     p.add_argument("--waist-blend-in-s", type=float, default=0.3, help="腰 arm→RL 过渡时长")
     p.add_argument("--waist-blend-out-s", type=float, default=0.4, help="腰 RL→arm 过渡时长(零速交还)")
     p.add_argument("--waist-bad-blend-out-s", type=float, default=0.2,
@@ -557,6 +1389,36 @@ def main():
     p.add_argument("--waist-takeover-blend-s", type=float,
                    default=DEFAULT_WAIST_TAKEOVER_BLEND_S,
                    help="arm_sdk 首次接管腰时从当前 RL 命令平滑混入的时长")
+    p.add_argument("--arm-control-socket", default=DEFAULT_ARM_CONTROL_SOCKET,
+                   help="H 手臂状态机 Unix socket；空字符串关闭")
+    p.add_argument("--arm-control-status-file", default=DEFAULT_ARM_CONTROL_STATUS_FILE)
+    p.add_argument("--arm-hang-move-s", type=float, default=3.0)
+    p.add_argument("--arm-hang-release-s", type=float, default=2.5)
+    p.add_argument(
+        "--arm-runtime-socket",
+        default=DEFAULT_ARM_RUNTIME_SOCKET,
+        help="操控 q/state Unix socket；空字符串关闭并仅保留 legacy rt/arm_sdk",
+    )
+    p.add_argument(
+        "--arm-runtime-status-file",
+        default=DEFAULT_ARM_RUNTIME_STATUS,
+    )
+    p.add_argument(
+        "--runtime-health-file",
+        default=DEFAULT_MERGER_HEALTH_FILE,
+        help="merger liveness/consumer heartbeat used by the motion health gate",
+    )
+    p.add_argument(
+        "--max-tick-gap-ms",
+        type=float,
+        default=DEFAULT_MAX_TICK_GAP_S * 1000.0,
+        help="publish DAMP and mark merger unhealthy after this tick gap",
+    )
+    p.add_argument(
+        "--safety-damping-kd",
+        type=float,
+        default=DEFAULT_SAFETY_DAMPING_KD,
+    )
     args = p.parse_args()
     Merger(
         iface=args.iface,
@@ -567,11 +1429,21 @@ def main():
         waist_to_rl_on_motion=args.waist_to_rl_on_motion,
         waist_ipc_file=args.waist_ipc_file,
         waist_ipc_stale_s=args.waist_ipc_stale_s,
+        motion_command_socket=args.motion_command_socket or None,
         waist_blend_in_s=args.waist_blend_in_s,
         waist_blend_out_s=args.waist_blend_out_s,
         waist_bad_blend_out_s=args.waist_bad_blend_out_s,
         waist_handback_delay=args.waist_handback_delay,
         waist_takeover_blend_s=args.waist_takeover_blend_s,
+        arm_control_socket=args.arm_control_socket or None,
+        arm_control_status_file=args.arm_control_status_file,
+        arm_hang_move_s=args.arm_hang_move_s,
+        arm_hang_release_s=args.arm_hang_release_s,
+        arm_runtime_socket=args.arm_runtime_socket or None,
+        arm_runtime_status_file=args.arm_runtime_status_file,
+        runtime_health_file=args.runtime_health_file or None,
+        max_tick_gap_s=args.max_tick_gap_ms / 1000.0,
+        safety_damping_kd=args.safety_damping_kd,
     ).run()
 
 

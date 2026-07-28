@@ -33,7 +33,7 @@ import time
 
 import requests
 
-from groot_mover import MAX_HEIGHT, MIN_HEIGHT, GrootMover, _clamp
+from groot_mover import MAX_HEIGHT, MIN_HEIGHT, GrootMover, MotionCancelled, _clamp
 
 
 class RemoteMover(GrootMover):
@@ -58,25 +58,41 @@ class RemoteMover(GrootMover):
 
     # --------- override the low-level primitives: the server holds each phase
     def _hold(self, forward: float, lateral: float, yaw: float,
-              duration: float) -> None:
+              duration: float, cancel_event=None) -> bool:
         """One /cmd?duration -> the server's motion thread holds this velocity
         for `duration` then zeroes; we block locally for the hold. Chained holds
         (settle-before -> warm-up -> move) each cancel the previous server thread,
         so _execute_move composes over HTTP exactly like the local IPC path."""
         if duration <= 0:
-            return
-        self._get("/cmd", vx=forward, vy=lateral, wz=yaw, duration=duration,
-                  height=self._height, fsm="RL_FULL")
-        time.sleep(duration)
+            return True
+        with self._command_lock:
+            if self._cancel_requested(cancel_event):
+                return False
+            self._get("/cmd", vx=forward, vy=lateral, wz=yaw, duration=duration,
+                      height=self._height, fsm="RL_FULL")
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            if self._motion_cancel.wait(min(0.05, remaining)):
+                return False
+            if self._cancel_requested(cancel_event):
+                return False
+        return True
 
-    def _settle(self) -> None:
-        self._get("/stop", height=self._height)
-        time.sleep(self.stop_hold_s)
+    def _settle(self, cancel_event=None) -> bool:
+        with self._command_lock:
+            if self._cancel_requested(cancel_event):
+                return False
+            self._get("/stop", height=self._height)
+        if self._motion_cancel.wait(self.stop_hold_s):
+            return False
+        return not self._cancel_requested(cancel_event)
 
     def _refresh_for(self, forward: float, lateral: float, yaw: float,
                      duration: float) -> None:  # back-compat
-        self._hold(forward, lateral, yaw, duration)
-        self._settle()
+        self._motion_cancel.clear()
+        if not self._hold(forward, lateral, yaw, duration) or not self._settle():
+            raise MotionCancelled("remote timed move cancelled")
 
     # --------------------------------------------------- state transitions
     def initialize(self) -> None:
@@ -85,7 +101,9 @@ class RemoteMover(GrootMover):
         self._log(f"RL_FULL ready (remote {self.ipc_url}).")
 
     def stop(self) -> None:
-        self._get("/stop", height=self._height)
+        self._motion_cancel.set()
+        with self._command_lock:
+            self._get("/stop", height=self._height)
 
     def set_height(self, height: float) -> None:
         self._height = float(_clamp(height, MIN_HEIGHT, MAX_HEIGHT))
@@ -93,22 +111,30 @@ class RemoteMover(GrootMover):
         self._log(f"base height = {self._height:.2f}m")
 
     def shutdown(self) -> None:
-        self._get("/mode", fsm="RL_LOWER", height=self._height)
+        self._motion_cancel.set()
+        with self._command_lock:
+            self._get("/mode", fsm="RL_LOWER", height=self._height)
         time.sleep(0.5)
         self._log("RL_LOWER (legs balance, arms free).")
 
     handoff_to_arms = shutdown  # re-bind to RemoteMover.shutdown
 
     def damp(self) -> None:
-        self._get("/damp", height=self._height)
+        self._motion_cancel.set()
+        with self._command_lock:
+            self._get("/damp", height=self._height)
         self._log("DAMP (kd-only damping).")
 
     estop = damp
 
     def limp(self) -> None:
-        self._get("/mode", fsm="LIMP", height=self._height)
+        self._motion_cancel.set()
+        with self._command_lock:
+            self._get("/mode", fsm="LIMP", height=self._height)
         self._log("LIMP (release stiffness).")
 
     def release(self) -> None:
-        self._get("/stop", height=self._height)
+        self._motion_cancel.set()
+        with self._command_lock:
+            self._get("/stop", height=self._height)
         self._log("stopped (remote; IPC file owned by the 5080).")

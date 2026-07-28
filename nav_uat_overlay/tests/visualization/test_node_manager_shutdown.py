@@ -49,6 +49,18 @@ class FakeActionExecutor:
         self._stop_flag = Event()
         self._finish_flag = Event()
         self._new_action_event = Event()
+        self.shutdown_calls = []
+
+    def shutdown(self, timeout_sec=None):
+        self.shutdown_calls.append(timeout_sec)
+
+
+class FakeStepControl:
+    def __init__(self):
+        self.shutdown_calls = 0
+
+    def shutdown(self):
+        self.shutdown_calls += 1
 
 
 def test_request_stop_signals_action_executor_and_calls_stop():
@@ -78,6 +90,8 @@ def test_shutdown_is_idempotent_and_destroys_managed_nodes():
     node_b = FakeNode()
     manager._nodes = [node_a, node_b]
     manager.executor_thread = FakeThread()
+    manager.action_excutor = FakeActionExecutor()
+    manager.step_control_client = FakeStepControl()
     manager.request_stop = lambda: None
 
     manager.shutdown(timeout_sec=0.5)
@@ -88,3 +102,5 @@ def test_shutdown_is_idempotent_and_destroys_managed_nodes():
     assert node_a.destroy_calls == 1
     assert node_b.destroy_calls == 1
     assert manager.executor_thread.join_calls == [0.5]
+    assert manager.action_excutor.shutdown_calls == [0.5]
+    assert manager.step_control_client.shutdown_calls == 1

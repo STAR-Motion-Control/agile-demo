@@ -10,7 +10,7 @@ from unitree_go.msg._wireless_controller import WirelessController
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 import logging
 from visualization.adapters import ExecutorVisualizationAdapter
-from .motion_backend import GrootHttpDiscreteBackend
+from .motion_backend import CombinedCancelToken, GrootHttpDiscreteBackend
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +289,14 @@ class ActionExecutorClient(Node):
         shutdown_flag = getattr(self, "_shutdown_flag", None)
         return bool(shutdown_flag is not None and shutdown_flag.is_set())
 
+    def _motion_cancel_token(self):
+        return CombinedCancelToken(
+            getattr(self, "_pause_flag", None),
+            getattr(self, "_stop_flag", None),
+            getattr(self, "_shutdown_flag", None),
+            self._ensure_preempt_action_event(),
+        )
+
     def _ensure_preempt_action_event(self):
         preempt_event = getattr(self, "_preempt_action_event", None)
         if preempt_event is None:
@@ -465,10 +473,14 @@ class ActionExecutorClient(Node):
             if not callable(publish_velocity) or not self._motion_backend_supports_continuous_velocity():
                 logger.warning("Ignoring continuous WirelessController command in GR00T backend mode.")
                 return False
+            cancel_token = self._motion_cancel_token()
+            if cancel_token.is_set():
+                return False
             success, message, _ = publish_velocity(
                 forward=float(msg.ly),
                 lateral=-float(msg.lx),
                 yaw=-float(msg.rx),
+                cancel_event=cancel_token,
             )
             if not success:
                 logger.warning("Failed to publish GR00T continuous velocity command: %s", message)
@@ -2099,12 +2111,22 @@ class ActionExecutorClient(Node):
         self._publish_zero_motion(repeat=5)
         if self.thread.is_alive():
             self.thread.join(timeout=timeout_sec)
+        backend = getattr(self, "motion_backend", None)
+        shutdown_backend = getattr(backend, "shutdown", None)
+        if callable(shutdown_backend):
+            try:
+                shutdown_backend()
+            except Exception as exc:
+                logger.warning("GR00T backend shutdown failed: %s", exc)
 
     def forward(self, distance = 1.0, speed = 1.0, near_goal=False):
         if self._motion_backend_enabled():
-            if self._stop_flag.is_set() or self._shutdown_requested():
+            cancel_token = self._motion_cancel_token()
+            if cancel_token.is_set():
                 return False, 'stopped.', -2
-            return self.motion_backend.forward(float(distance))
+            return self.motion_backend.forward(
+                float(distance), cancel_event=cancel_token
+            )
 
         closed_loop_result = self._run_closed_loop_forward(distance, speed, near_goal=near_goal)
         if closed_loop_result is True:
@@ -2145,9 +2167,12 @@ class ActionExecutorClient(Node):
 
     def shift(self, distance = 1.0, speed = 0.5):
         if self._motion_backend_enabled():
-            if self._stop_flag.is_set() or self._shutdown_requested():
+            cancel_token = self._motion_cancel_token()
+            if cancel_token.is_set():
                 return False, 'stopped.', -2
-            return self.motion_backend.shift(float(distance))
+            return self.motion_backend.shift(
+                float(distance), cancel_event=cancel_token
+            )
 
         msg = WirelessController()
         msg.lx = -speed if distance > 0 else speed
@@ -2177,9 +2202,12 @@ class ActionExecutorClient(Node):
 
     def rotate(self, angle = math.pi/2, speed = math.pi/2, near_goal=False):
         if self._motion_backend_enabled():
-            if self._stop_flag.is_set() or self._shutdown_requested():
+            cancel_token = self._motion_cancel_token()
+            if cancel_token.is_set():
                 return False, 'stopped.', -2
-            return self.motion_backend.rotate(float(angle))
+            return self.motion_backend.rotate(
+                float(angle), cancel_event=cancel_token
+            )
 
         closed_loop_result = self._run_closed_loop_rotate(angle, speed, near_goal=near_goal)
         if closed_loop_result is True:

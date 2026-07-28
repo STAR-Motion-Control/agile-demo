@@ -3,8 +3,9 @@
 """GrootMover — precise small-move locomotion interface for GR00T-WBC.
 
 Drop-in replacement for box_demo_2/robot_move.py::RobotMover that drives the
-GR00T-WBC decoupled-WBC base via the file IPC `/tmp/robojudo_ext_cmd.json`,
-consumed by groot_wbc_boxdemo_adapter.py. The manipulation pipeline keeps calling
+GR00T-WBC decoupled-WBC base through a command sink. The refactored runtime uses
+the lease-based Unix motion bus; the direct `/tmp/robojudo_ext_cmd.json` writer
+is retained only for legacy A/B use. The manipulation pipeline keeps calling
 in meters/radians (or the cm/deg convenience wrappers); this module converts a
 distance/angle request into a *velocity + duration* and refreshes the IPC while
 the move is active (open-loop timed velocity — there is no odometry feedback).
@@ -63,11 +64,31 @@ from __future__ import annotations
 import json
 import math
 import os
+import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 CMD_FILE = "/tmp/robojudo_ext_cmd.json"
+
+
+def _environment_command_sink(command_sink):
+    if command_sink is not None:
+        return command_sink
+    socket_path = os.environ.get("GROOT_MOTION_BUS_SOCKET")
+    if not socket_path:
+        return None
+    repo_root = Path(__file__).resolve().parent.parent
+    if str(repo_root) not in sys.path:
+        sys.path.insert(0, str(repo_root))
+    from onboard_runtime.mover_transport import MotionBusCommandSink
+
+    return MotionBusCommandSink(
+        source=os.environ.get("GROOT_MOTION_SOURCE", "manipulation.groot_mover"),
+        socket_path=socket_path,
+    )
 RUNTIME_CONFIG_FILE = os.environ.get(
     "GROOT_BOX_RUNTIME_CONFIG", "/tmp/groot_box_runtime.json"
 )
@@ -168,6 +189,10 @@ class MotionPlan:
     floored: bool      # True if the floor bound -> the small target will overshoot
 
 
+class MotionCancelled(RuntimeError):
+    """Raised when a concurrent stop interrupts a blocking timed move."""
+
+
 def _clamp(v: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, v))
 
@@ -264,6 +289,7 @@ class GrootMover:
     """File-IPC mover for the GR00T-WBC base. Drop-in for RobotMover."""
 
     def __init__(self, velocity: float | None = None, *, cmd_file: str = CMD_FILE,
+                 command_sink=None,
                  stand_height: float = STAND_HEIGHT,
                  fwd_cruise: float = FWD_CRUISE, lat_cruise: float = LAT_CRUISE,
                  yaw_cruise: float = YAW_CRUISE, fwd_max: float = FWD_MAX,
@@ -277,6 +303,7 @@ class GrootMover:
                  auto_raise_for_walk: bool = False, dist_gain: float = DIST_GAIN,
                  verbose: bool = True):
         self.cmd_file = cmd_file
+        self._command_sink = _environment_command_sink(command_sink)
         self._height = stand_height
         # `velocity` (RobotMover-compatible positional) overrides the fwd cruise.
         self.fwd_cruise = float(velocity) if velocity else fwd_cruise
@@ -303,43 +330,89 @@ class GrootMover:
         self.refresh_hz = refresh_hz
         self.stop_hold_s = stop_hold_s
         self.verbose = verbose
+        self._motion_cancel = threading.Event()
+        self._command_lock = threading.RLock()
 
     # ----------------------------------------------------------------- helpers
     def _log(self, msg: str) -> None:
         if self.verbose:
             print(f"  GrootMover: {msg}")
 
+    def _write_command(self, fsm: str | None, forward: float = 0.0,
+                       lateral: float = 0.0, yaw: float = 0.0, **kwargs) -> None:
+        writer = self._command_sink or write_command
+        with self._command_lock:
+            writer(self.cmd_file, fsm, forward, lateral, yaw, **kwargs)
+
+    def _cancel_requested(self, cancel_event=None) -> bool:
+        return self._motion_cancel.is_set() or bool(
+            cancel_event is not None and cancel_event.is_set()
+        )
+
+    def _write_active_command(
+        self,
+        fsm: str,
+        forward: float = 0.0,
+        lateral: float = 0.0,
+        yaw: float = 0.0,
+        *,
+        cancel_event=None,
+        **kwargs,
+    ) -> bool:
+        with self._command_lock:
+            if self._cancel_requested(cancel_event):
+                return False
+            writer = self._command_sink or write_command
+            writer(self.cmd_file, fsm, forward, lateral, yaw, **kwargs)
+            return True
+
     def _hold(self, forward: float, lateral: float, yaw: float,
-              duration: float) -> None:
+              duration: float, cancel_event=None) -> bool:
         """Hold a velocity for `duration` (blocking). NO trailing settle, so it
         can be chained (settle -> warm-up -> move) without a Balance gap that
         would let the gait spin down between phases."""
         if duration <= 0:
-            return
+            return True
         period = 1.0 / self.refresh_hz
-        deadline = time.time() + duration
-        while time.time() < deadline:
-            remaining = max(0.0, deadline - time.time())
-            write_command(self.cmd_file, "RL_FULL", forward, lateral, yaw,
-                          height=self._height, duration=remaining)
-            time.sleep(period)
+        deadline = time.monotonic() + duration
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            if not self._write_active_command(
+                "RL_FULL", forward, lateral, yaw,
+                height=self._height, duration=remaining,
+                cancel_event=cancel_event,
+            ):
+                return False
+            if self._motion_cancel.wait(min(period, remaining)):
+                return False
+            if self._cancel_requested(cancel_event):
+                return False
+        return True
 
-    def _settle(self) -> None:
+    def _settle(self, cancel_event=None) -> bool:
         """Write zero velocity (Balance) for stop_hold_s so the base comes to rest."""
         period = 1.0 / self.refresh_hz
-        end = time.time() + self.stop_hold_s
-        while time.time() < end:
-            write_command(self.cmd_file, "RL_FULL", 0.0, 0.0, 0.0,
-                          height=self._height)
-            time.sleep(period)
+        end = time.monotonic() + self.stop_hold_s
+        while time.monotonic() < end:
+            remaining = max(0.0, end - time.monotonic())
+            if not self._write_active_command(
+                "RL_FULL", height=self._height, cancel_event=cancel_event
+            ):
+                return False
+            if self._motion_cancel.wait(min(period, remaining)):
+                return False
+            if self._cancel_requested(cancel_event):
+                return False
+        return True
 
     def _refresh_for(self, forward: float, lateral: float, yaw: float,
                      duration: float) -> None:
         """Hold then settle (kept for back-compat; move_* uses _execute_move)."""
-        self._hold(forward, lateral, yaw, duration)
-        self._settle()
+        self._motion_cancel.clear()
+        if not self._hold(forward, lateral, yaw, duration) or not self._settle():
+            raise MotionCancelled("timed move cancelled")
 
-    def _guard_walk_height(self) -> bool:
+    def _guard_walk_height(self, cancel_event=None) -> bool:
         """GR00T-WBC Walk stops stepping below ~0.70 m (mujoco sweep). Returns
         True if it is OK to walk. Warns (and optionally raises) otherwise."""
         if self._height >= self.walk_min_height - 1e-6:
@@ -348,28 +421,58 @@ class GrootMover:
             prev = self._height  # capture BEFORE set_height mutates it
             self._log(f"height {prev:.2f}m < walk floor "
                       f"{self.walk_min_height:.2f}m -> raising before walking")
-            self.set_height(self.walk_min_height)
+            with self._command_lock:
+                if self._cancel_requested(cancel_event):
+                    return False
+                self.set_height(self.walk_min_height)
             # wait for the height slew (adapter height_rate ~0.20 m/s) + margin,
             # so the base is actually above the walk floor before it steps.
-            time.sleep(max(0.0, self.walk_min_height - prev) / 0.20 + 0.3)
+            deadline = time.monotonic() + (
+                max(0.0, self.walk_min_height - prev) / 0.20 + 0.3
+            )
+            while time.monotonic() < deadline:
+                if self._cancel_requested(cancel_event):
+                    return False
+                remaining = max(0.0, deadline - time.monotonic())
+                if self._motion_cancel.wait(min(0.05, remaining)):
+                    return False
             return True
         self._log(f"[WARN] height {self._height:.2f}m < walk floor "
                   f"{self.walk_min_height:.2f}m: GR00T-WBC won't step while "
                   f"squatting. Raise height (or set auto_raise_for_walk) to walk.")
         return False
 
+    def _begin_move(self, cancel_event=None) -> None:
+        self._motion_cancel.clear()
+        if self._guard_walk_height(cancel_event):
+            return
+        if self._cancel_requested(cancel_event):
+            raise MotionCancelled("timed move cancelled while raising height")
+        raise RuntimeError(
+            f"base height {self._height:.2f}m is below walk floor "
+            f"{self.walk_min_height:.2f}m"
+        )
+
     def _execute_move(self, forward: float, lateral: float, yaw: float,
-                      duration: float, warm: bool = True) -> None:
+                      duration: float, warm: bool = True, cancel_event=None) -> None:
         """settle-before -> warm-up pre-step -> main move -> settle."""
+        if self._cancel_requested(cancel_event):
+            raise MotionCancelled("timed move cancelled before start")
         if self.settle_before_s > 0:
-            self._hold(0.0, 0.0, 0.0, self.settle_before_s)  # damp residual sway
+            if not self._hold(
+                0.0, 0.0, 0.0, self.settle_before_s, cancel_event
+            ):
+                raise MotionCancelled("timed move cancelled while settling")
         if warm and self.warmup_time > 0:
             wf = math.copysign(self.warmup_speed, forward) if abs(forward) > 1e-9 else 0.0
             wl = math.copysign(self.warmup_speed, lateral) if abs(lateral) > 1e-9 else 0.0
             if wf or wl:
-                self._hold(wf, wl, 0.0, self.warmup_time)  # spin up the gait
-        self._hold(forward, lateral, yaw, duration)
-        self._settle()
+                if not self._hold(wf, wl, 0.0, self.warmup_time, cancel_event):
+                    raise MotionCancelled("timed move cancelled during warmup")
+        if not self._hold(forward, lateral, yaw, duration, cancel_event):
+            raise MotionCancelled("timed move cancelled")
+        if not self._settle(cancel_event=cancel_event):
+            raise MotionCancelled("timed move cancelled while settling")
 
     def _snap_min_distance(self, distance_m: float, tag: str) -> float:
         """选项B: 把过小的线性目标顶到 min_distance。太短的前进只会让步态做一个
@@ -383,11 +486,11 @@ class GrootMover:
 
     # ----------------------------------------------------- RobotMover surface
     def initialize(self) -> None:
-        write_command(self.cmd_file, "RL_FULL", height=self._height)
+        self._write_command("RL_FULL", height=self._height)
         time.sleep(1.5)
         self._log("RL_FULL ready.")
 
-    def move_forward(self, distance_m: float) -> MotionPlan:
+    def move_forward(self, distance_m: float, *, cancel_event=None) -> MotionPlan:
         """Forward (+) / backward (-) by distance in METERS. Blocks until done."""
         desired = self._snap_min_distance(distance_m, "forward")
         commanded = desired * self.dist_gain
@@ -395,16 +498,18 @@ class GrootMover:
                             self.fwd_max, self.min_duration)
         if plan.duration <= 0:
             return plan
-        self._guard_walk_height()
+        self._begin_move(cancel_event)
         tag = "forward" if desired > 0 else "backward"
         flo = " [floored->overshoot]" if plan.floored else ""
         gain = f" gain->{abs(commanded)*100:.1f}cm" if self.dist_gain > 1.0 else ""
         self._log(f"{tag} {abs(desired)*100:.1f}cm{gain} "
                   f"(v={plan.speed:+.3f}m/s, {plan.duration:.2f}s){flo}")
-        self._execute_move(plan.speed, 0.0, 0.0, plan.duration)
+        self._execute_move(
+            plan.speed, 0.0, 0.0, plan.duration, cancel_event=cancel_event
+        )
         return plan
 
-    def move_left(self, distance_m: float) -> MotionPlan:
+    def move_left(self, distance_m: float, *, cancel_event=None) -> MotionPlan:
         """Left (+) / right (-) strafe by distance in METERS. Blocks until done."""
         desired = self._snap_min_distance(distance_m, "strafe")
         commanded = desired * self.dist_gain
@@ -412,37 +517,67 @@ class GrootMover:
                             self.lat_max, self.min_duration)
         if plan.duration <= 0:
             return plan
-        self._guard_walk_height()
+        self._begin_move(cancel_event)
         tag = "left" if desired > 0 else "right"
         flo = " [floored->overshoot]" if plan.floored else ""
         gain = f" gain->{abs(commanded)*100:.1f}cm" if self.dist_gain > 1.0 else ""
         self._log(f"{tag} {abs(desired)*100:.1f}cm{gain} "
                   f"(v={plan.speed:+.3f}m/s, {plan.duration:.2f}s){flo}")
-        self._execute_move(0.0, plan.speed, 0.0, plan.duration)
+        self._execute_move(
+            0.0, plan.speed, 0.0, plan.duration, cancel_event=cancel_event
+        )
         return plan
 
-    def rotate(self, angle_rad: float, yaw_speed: float | None = None) -> MotionPlan:
+    def rotate(
+        self,
+        angle_rad: float,
+        yaw_speed: float | None = None,
+        *,
+        cancel_event=None,
+    ) -> MotionPlan:
         """Turn left (+) / right (-) by angle in RADIANS. Blocks until done."""
         cruise = self.yaw_cruise if yaw_speed is None else yaw_speed
         plan = solve_yaw(angle_rad, cruise, self.w_floor, self.yaw_max,
                          self.min_duration)
         if plan.duration <= 0:
             return plan
-        self._guard_walk_height()
+        self._begin_move(cancel_event)
         tag = "left" if angle_rad > 0 else "right"
         flo = " [floored->overshoot]" if plan.floored else ""
         self._log(f"turn {tag} {abs(math.degrees(angle_rad)):.1f}deg "
                   f"(w={plan.speed:+.3f}rad/s, {plan.duration:.2f}s, "
                   f"exp={math.degrees(plan.expected):+.1f}deg){flo}")
-        self._execute_move(0.0, 0.0, plan.speed, plan.duration, warm=False)
+        self._execute_move(
+            0.0,
+            0.0,
+            plan.speed,
+            plan.duration,
+            warm=False,
+            cancel_event=cancel_event,
+        )
         return plan
 
     def stop(self) -> None:
-        write_command(self.cmd_file, "RL_FULL", height=self._height)
+        self._motion_cancel.set()
+        self._write_command("RL_FULL", height=self._height)
+
+    def publish_velocity(
+        self,
+        forward: float,
+        lateral: float = 0.0,
+        yaw: float = 0.0,
+    ) -> None:
+        self._write_command(
+            "RL_FULL",
+            forward,
+            lateral,
+            yaw,
+            height=self._height,
+        )
 
     def set_height(self, height: float) -> None:
         self._height = float(_clamp(height, MIN_HEIGHT, MAX_HEIGHT))
-        write_command(self.cmd_file, "RL_FULL", height=self._height)
+        self._write_command("RL_FULL", height=self._height)
         self._log(f"base height = {self._height:.2f}m")
 
     def adjust_height(self, delta_m: float) -> None:
@@ -450,23 +585,39 @@ class GrootMover:
 
     def shutdown(self) -> None:
         """Hand the upper body to arm_sdk: legs keep balancing (RL_LOWER)."""
-        write_command(self.cmd_file, "RL_LOWER", height=self._height)
+        self._motion_cancel.set()
+        if self._command_sink is not None and hasattr(self._command_sink, "hold"):
+            self._command_sink.hold(
+                fsm="RL_LOWER",
+                height=self._height,
+                allow_recovery=False,
+                defer_recovery=True,
+            )
+        else:
+            self._write_command("RL_LOWER", height=self._height)
         time.sleep(0.5)
-        self._log("RL_LOWER (legs balance, arms free). IPC file kept.")
+        self._log("RL_LOWER (legs balance, arms free). Hold remains leased.")
 
     handoff_to_arms = shutdown  # explicit alias
 
     def damp(self) -> None:
-        write_command(self.cmd_file, "DAMP", height=self._height, estop=True)
+        self._motion_cancel.set()
+        self._write_command("DAMP", height=self._height, estop=True)
         self._log("DAMP (kd-only damping).")
 
     estop = damp
 
     def limp(self) -> None:
-        write_command(self.cmd_file, "LIMP", height=self._height, limp=True)
+        self._motion_cancel.set()
+        self._write_command("LIMP", height=self._height, limp=True)
         self._log("LIMP (release stiffness).")
 
     def release(self) -> None:
+        self._motion_cancel.set()
+        if self._command_sink is not None and hasattr(self._command_sink, "release"):
+            self._command_sink.release()
+            self._log("motion-bus lease released.")
+            return
         try:
             if os.path.exists(self.cmd_file):
                 os.remove(self.cmd_file)

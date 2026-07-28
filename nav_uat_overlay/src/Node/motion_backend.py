@@ -1,12 +1,24 @@
 import logging
+import importlib.util
 import json
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 
 logger = logging.getLogger(__name__)
+
+
+class CombinedCancelToken:
+    """Read-only Event-compatible view over multiple cancellation sources."""
+
+    def __init__(self, *events):
+        self._events = tuple(event for event in events if event is not None)
+
+    def is_set(self) -> bool:
+        return any(event.is_set() for event in self._events)
 
 
 def config_get(config: Any, key: str, default: Any = None) -> Any:
@@ -78,18 +90,18 @@ def resolve_stop_hold(backend_cfg: Any) -> float:
 
 
 class GrootHttpDiscreteBackend:
-    """Distance/angle motion backend backed by box_demo RemoteMover.
+    """GR00T distance/angle backend with HTTP rollback compatibility.
 
     Discrete rotate/forward/shift calls remain the default interface. Closed-loop
-    navigation can also use publish_velocity() to send short HTTP velocity holds
-    for combined forward+yaw waypoint control. On G001 the bridge runs locally on
-    127.0.0.1; older deployments used a remote 5080 bridge.
+    navigation uses one shared Unix-datagram producer in the refactored runtime.
+    The old HTTP bridge remains selectable only for baseline comparisons.
     """
 
     def __init__(self, cfg: Any, log=None):
         backend_cfg = config_get(cfg, "motion_backend", None)
         self.backend_type = str(config_get(backend_cfg, "type", "wireless_controller"))
-        self.enabled = self.backend_type == "groot_http_discrete"
+        self._bus_enabled = self.backend_type == "groot_motion_bus"
+        self.enabled = self.backend_type in ("groot_motion_bus", "groot_http_discrete")
         self.log = log or logger
         self._mover = None
         self._initialized = False
@@ -124,9 +136,15 @@ class GrootHttpDiscreteBackend:
         if not self.enabled:
             return
 
-        module_path = os.path.expanduser(
-            str(config_get(backend_cfg, "box_demo_module_path", "/home/unitree/zihou/box_demo_2"))
+        repository_root = Path(__file__).resolve().parents[3]
+        default_module_path = (
+            repository_root / "box_demo_groot"
+            if self._bus_enabled
+            else Path("/home/unitree/zihou/box_demo_2")
         )
+        module_path = os.path.expanduser(str(
+            config_get(backend_cfg, "box_demo_module_path", default_module_path)
+        ))
         ipc_url = str(config_get(backend_cfg, "ipc_url", "http://192.168.123.222:5001")).rstrip("/")
         timeout = float(config_get(backend_cfg, "http_timeout", 2.0))
         motion_profile = resolve_motion_profile(backend_cfg)
@@ -145,24 +163,6 @@ class GrootHttpDiscreteBackend:
 
         if module_path and module_path not in sys.path:
             sys.path.insert(0, module_path)
-
-        try:
-            from remote_mover import RemoteMover
-        except Exception as exc:
-            raise RuntimeError(
-                f"Cannot import RemoteMover from {module_path!r}; "
-                "check motion_backend.box_demo_module_path"
-            ) from exc
-
-        class StrictRemoteMover(RemoteMover):
-            def _get(self, path: str, **params):
-                response = self._session.get(
-                    f"{self.ipc_url}{path}",
-                    params=params,
-                    timeout=self._timeout,
-                )
-                response.raise_for_status()
-                return response.json()
 
         stop_hold_s = resolve_stop_hold(backend_cfg)
 
@@ -190,13 +190,67 @@ class GrootHttpDiscreteBackend:
             "recover_each_move": False,
             "verbose": bool(config_get(backend_cfg, "verbose", True)),
         }
-        self._mover = StrictRemoteMover(ipc_url, timeout=timeout, **mover_kwargs)
+        if self._bus_enabled:
+            runtime_module_path = os.path.expanduser(str(config_get(
+                backend_cfg, "runtime_module_path", repository_root
+            )))
+            if runtime_module_path and runtime_module_path not in sys.path:
+                sys.path.insert(0, runtime_module_path)
+            try:
+                from onboard_runtime.mover_transport import MotionBusCommandSink
+                mover_file = Path(module_path) / "groot_mover.py"
+                spec = importlib.util.spec_from_file_location(
+                    "_nav_groot_mover", mover_file
+                )
+                if spec is None or spec.loader is None:
+                    raise ImportError(f"cannot load {mover_file}")
+                mover_module = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = mover_module
+                spec.loader.exec_module(mover_module)
+                GrootMover = mover_module.GrootMover
+            except Exception as exc:
+                raise RuntimeError(
+                    "Cannot import GrootMover/motion bus runtime; check "
+                    "motion_backend.box_demo_module_path and runtime_module_path"
+                ) from exc
+            bus_socket = str(
+                os.environ.get("GROOT_MOTION_BUS_SOCKET")
+                or runtime_value("motion_bus_socket", "/tmp/groot_motion_bus.sock")
+            )
+            sink = MotionBusCommandSink(
+                source="navigation",
+                socket_path=bus_socket,
+                lease_s=self._continuous_hold_duration,
+            )
+            self._mover = GrootMover(command_sink=sink, **mover_kwargs)
+            transport_name = f"Unix datagram {bus_socket}"
+        else:
+            try:
+                from remote_mover import RemoteMover
+            except Exception as exc:
+                raise RuntimeError(
+                    f"Cannot import RemoteMover from {module_path!r}; "
+                    "check motion_backend.box_demo_module_path"
+                ) from exc
+
+            class StrictRemoteMover(RemoteMover):
+                def _get(self, path: str, **params):
+                    response = self._session.get(
+                        f"{self.ipc_url}{path}",
+                        params=params,
+                        timeout=self._timeout,
+                    )
+                    response.raise_for_status()
+                    return response.json()
+
+            self._mover = StrictRemoteMover(ipc_url, timeout=timeout, **mover_kwargs)
+            transport_name = f"HTTP {ipc_url}"
         self.log.info(
-            "Using GR00T HTTP discrete motion backend at %s (profile=%s, "
+            "Using GR00T motion backend over %s (profile=%s, "
             "min_duration=%.2f, min_distance=%.2f, v_floor=%.2f, "
             "warmup=%.2fs@%.2fm/s, stand_height=%.2fm, runtime=%s, "
             "slew=%.2f/%.2f)",
-            ipc_url,
+            transport_name,
             motion_profile,
             min_duration,
             min_distance,
@@ -224,7 +278,10 @@ class GrootHttpDiscreteBackend:
             self.enabled
             and self._continuous_velocity_enabled
             and self._mover is not None
-            and hasattr(self._mover, "_get")
+            and (
+                hasattr(self._mover, "publish_velocity")
+                or hasattr(self._mover, "_get")
+            )
         )
 
     @staticmethod
@@ -247,10 +304,19 @@ class GrootHttpDiscreteBackend:
         self._continuous_applied_command = (0.0, 0.0, 0.0)
         self._continuous_applied_time = None
 
-    def publish_velocity(self, forward: float, lateral: float = 0.0, yaw: float = 0.0):
+    def publish_velocity(
+        self,
+        forward: float,
+        lateral: float = 0.0,
+        yaw: float = 0.0,
+        *,
+        cancel_event=None,
+    ):
         if not self.supports_continuous_velocity():
             return self._result(False, "GR00T continuous velocity is unavailable.", -1)
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                return self._result(False, "continuous command cancelled.", -2)
             self._ensure_ready()
             forward = self._clamp_axis(forward, getattr(self._mover, "fwd_max", 0.50))
             lateral = self._clamp_axis(lateral, getattr(self._mover, "lat_max", 0.30))
@@ -287,19 +353,38 @@ class GrootHttpDiscreteBackend:
             ):
                 return self._result(True, "continuous velocity held.", 1)
 
-            params = {
-                "vx": command[0],
-                "vy": command[1],
-                "wz": command[2],
-                "duration": self._continuous_hold_duration,
-                "fsm": self._continuous_fsm,
-                "allow_recovery": 0,
-                "defer_recovery": 1,
-            }
-            height = getattr(self._mover, "_height", None)
-            if height is not None:
-                params["height"] = height
-            self._mover._get("/cmd", **params)
+            if getattr(self, "_bus_enabled", False):
+                self._mover.publish_velocity(
+                    command[0],
+                    command[1],
+                    command[2],
+                    allow_recovery=False,
+                    defer_recovery=True,
+                    cancel_event=cancel_event,
+                )
+            else:
+                params = {
+                    "vx": command[0],
+                    "vy": command[1],
+                    "wz": command[2],
+                    "duration": self._continuous_hold_duration,
+                    "fsm": self._continuous_fsm,
+                    "allow_recovery": 0,
+                    "defer_recovery": 1,
+                }
+                height = getattr(self._mover, "_height", None)
+                if height is not None:
+                    params["height"] = height
+                command_lock = getattr(self._mover, "_command_lock", None)
+                if command_lock is None:
+                    if cancel_event is not None and cancel_event.is_set():
+                        return self._result(False, "continuous command cancelled.", -2)
+                    self._mover._get("/cmd", **params)
+                else:
+                    with command_lock:
+                        if cancel_event is not None and cancel_event.is_set():
+                            return self._result(False, "continuous command cancelled.", -2)
+                        self._mover._get("/cmd", **params)
             self._last_continuous_command = command
             self._last_continuous_send_time = now
             self._continuous_applied_command = command
@@ -309,40 +394,40 @@ class GrootHttpDiscreteBackend:
             self.log.warning("GR00T continuous velocity failed: %s", exc)
             return self._result(False, f"GR00T continuous velocity failed: {exc}", -1)
 
-    def forward(self, distance_m: float):
+    def forward(self, distance_m: float, *, cancel_event=None):
         if not self.enabled:
             return self._result(False, "GR00T backend is disabled.", -1)
         try:
             if abs(float(distance_m)) < 1e-6:
                 return self._result(True, "zero forward distance skipped.", 1)
             self._ensure_ready()
-            self._mover.move_forward(float(distance_m))
+            self._mover.move_forward(float(distance_m), cancel_event=cancel_event)
             return self._result(True, "success.", 1)
         except Exception as exc:
             self.log.warning("GR00T forward failed: %s", exc)
             return self._result(False, f"GR00T forward failed: {exc}", -1)
 
-    def shift(self, distance_m: float):
+    def shift(self, distance_m: float, *, cancel_event=None):
         if not self.enabled:
             return self._result(False, "GR00T backend is disabled.", -1)
         try:
             if abs(float(distance_m)) < 1e-6:
                 return self._result(True, "zero lateral distance skipped.", 1)
             self._ensure_ready()
-            self._mover.move_left(float(distance_m))
+            self._mover.move_left(float(distance_m), cancel_event=cancel_event)
             return self._result(True, "success.", 1)
         except Exception as exc:
             self.log.warning("GR00T lateral move failed: %s", exc)
             return self._result(False, f"GR00T lateral move failed: {exc}", -1)
 
-    def rotate(self, angle_rad: float):
+    def rotate(self, angle_rad: float, *, cancel_event=None):
         if not self.enabled:
             return self._result(False, "GR00T backend is disabled.", -1)
         try:
             if abs(float(angle_rad)) < 1e-6:
                 return self._result(True, "zero rotation skipped.", 1)
             self._ensure_ready()
-            self._mover.rotate(float(angle_rad))
+            self._mover.rotate(float(angle_rad), cancel_event=cancel_event)
             return self._result(True, "success.", 1)
         except Exception as exc:
             self.log.warning("GR00T rotate failed: %s", exc)
@@ -374,4 +459,18 @@ class GrootHttpDiscreteBackend:
             return self._result(False, f"GR00T segment finish failed: {exc}", -1)
 
     def shutdown(self):
-        return self.stop()
+        stop_result = self.stop()
+        release = getattr(self._mover, "release", None)
+        if not callable(release):
+            return stop_result
+        try:
+            release()
+        except Exception as exc:
+            self.log.warning("GR00T lease release failed during shutdown: %s", exc)
+            if stop_result[0]:
+                return self._result(
+                    False,
+                    f"GR00T stopped but lease release failed: {exc}",
+                    -1,
+                )
+        return stop_result

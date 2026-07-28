@@ -9,19 +9,20 @@ import os
 import time
 from typing import Any
 
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-
 GRIP_DROP_RATIO = 0.70
 
 
 class GripMetricsLog:
-    """记录夹持检测窗口力矩指标，并导出 JSON + PNG。"""
+    """记录夹持检测窗口力矩指标；PNG 绘图仅在显式启用时生成。"""
 
-    def __init__(self, output_dir: str | None = None):
+    def __init__(
+        self,
+        output_dir: str | None = None,
+        *,
+        enable_plot: bool = False,
+    ):
         self.output_dir = output_dir
+        self.enable_plot = bool(enable_plot)
         self._records: list[dict[str, Any]] = []
         self._t0: float | None = None
 
@@ -62,7 +63,7 @@ class GripMetricsLog:
         )
 
     def save(self, output_dir: str | None = None, tag: str | None = None) -> str | None:
-        """写入 JSON 与 PNG。无记录时返回 None。"""
+        """写入 JSON，并在显式启用时生成 PNG。无记录时返回 None。"""
         if not self._records:
             return None
         out_dir = output_dir or self.output_dir
@@ -75,13 +76,21 @@ class GripMetricsLog:
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(self._records, f, ensure_ascii=False, indent=2)
 
-        png_path = os.path.join(out_dir, f"grip_metrics{suffix}.png")
-        self._plot(png_path)
         print(f"[grip_log] 指标 JSON → {json_path}")
-        print(f"[grip_log] 指标曲线 → {png_path}")
+        if self.enable_plot:
+            png_path = os.path.join(out_dir, f"grip_metrics{suffix}.png")
+            self._plot(png_path)
+            print(f"[grip_log] 指标曲线 → {png_path}")
         return out_dir
 
     def _plot(self, png_path: str) -> None:
+        # Plotting is diagnostics-only. Keep matplotlib and its font/cache work
+        # out of the live manipulation process until a log is actually saved.
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
         fig, ax = plt.subplots(1, 1, figsize=(12, 5))
         fig.suptitle("Grip Watch Torque (250ms windows)", fontsize=13)
 

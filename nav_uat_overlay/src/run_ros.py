@@ -5,6 +5,18 @@ import math
 import os
 import socket
 
+from nav_runtime_guard import NavigationStartupError, authorized_navigation_process
+
+
+_NAV_PROCESS_GUARD = None
+if __name__ == "__main__":
+    try:
+        _NAV_PROCESS_GUARD = authorized_navigation_process()
+        _NAV_PROCESS_GUARD.__enter__()
+    except NavigationStartupError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
 import cv2
 import hydra
 import numpy as np
@@ -26,6 +38,9 @@ from visualization.state_hub import VisualizationStateHub
 
 
 logger = logging.getLogger()
+NAV_CONFIG_NAME = os.environ.get("NAV_CONFIG_NAME", "config_bk")
+if NAV_CONFIG_NAME not in ("config", "config_bk"):
+    raise RuntimeError("NAV_CONFIG_NAME must be 'config' or 'config_bk'")
 
 
 def config_get(config, key, default=None):
@@ -547,11 +562,15 @@ class NavRosBridge(Node):
         return response
 
 
-@hydra.main(version_base=None, config_path=".", config_name="config")
+@hydra.main(version_base=None, config_path=".", config_name=NAV_CONFIG_NAME)
 def main(cfg):
+    if _NAV_PROCESS_GUARD is None:
+        raise NavigationStartupError(
+            "navigation main requires the guarded __main__ launcher path"
+        )
     prepare4log()
     logger.info("Starting nav ROS bridge...")
-    logger.info("Hydra config loaded.")
+    logger.info("Hydra config loaded: %s", NAV_CONFIG_NAME)
 
     map_ctx = prepare_map(cfg)
     visualization = prepare_visualization(cfg, map_ctx)
@@ -608,4 +627,7 @@ def main(cfg):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        _NAV_PROCESS_GUARD.__exit__(None, None, None)

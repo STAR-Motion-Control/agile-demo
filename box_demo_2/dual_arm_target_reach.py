@@ -38,7 +38,6 @@ box_demo_2 说明:
     每帧同步 **mode_machine / mode_pr**（与 rt/lowstate 一致）。
 """
 
-import ctypes
 import fcntl
 import os
 import select
@@ -49,22 +48,95 @@ import math
 import argparse
 from enum import IntEnum
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
 from grip_metrics_log import GripMetricsLog
 
-_ddsc = Path(os.environ.get("CYCLONEDDS_HOME", Path.home() / "cyclonedds-0.10-install")) / "lib" / "libddsc.so.0"
-if _ddsc.is_file():
-    ctypes.CDLL(str(_ddsc), mode=ctypes.RTLD_GLOBAL)
+_LEGACY_SDK = None
 
-from unitree_sdk2py.core.channel import (
-    ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize
-)
-from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
-from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
-from unitree_sdk2py.utils.crc import CRC
-from unitree_sdk2py.utils.thread import RecurrentThread
+
+def _legacy_sdk():
+    """Load CycloneDDS only for the explicit legacy arm transport."""
+    global _LEGACY_SDK
+    if _LEGACY_SDK is not None:
+        return _LEGACY_SDK
+    import ctypes
+
+    ddsc = (
+        Path(
+            os.environ.get(
+                "CYCLONEDDS_HOME",
+                Path.home() / "cyclonedds-0.10-install",
+            )
+        )
+        / "lib"
+        / "libddsc.so.0"
+    )
+    if ddsc.is_file():
+        ctypes.CDLL(str(ddsc), mode=ctypes.RTLD_GLOBAL)
+    from unitree_sdk2py.core.channel import (
+        ChannelFactoryInitialize,
+        ChannelPublisher,
+        ChannelSubscriber,
+    )
+    from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
+    from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
+    from unitree_sdk2py.utils.crc import CRC
+
+    _LEGACY_SDK = SimpleNamespace(
+        ChannelFactoryInitialize=ChannelFactoryInitialize,
+        ChannelPublisher=ChannelPublisher,
+        ChannelSubscriber=ChannelSubscriber,
+        LowCmd=LowCmd_,
+        LowState=LowState_,
+        new_low_cmd=unitree_hg_msg_dds__LowCmd_,
+        CRC=CRC,
+    )
+    return _LEGACY_SDK
+
+
+class FixedRateThread:
+    """Small monotonic scheduler used by the 50 Hz trajectory loop."""
+
+    def __init__(self, interval: float, target, name: str):
+        self._interval = float(interval)
+        self._target = target
+        self._exception: BaseException | None = None
+        self._thread = threading.Thread(
+            target=self._run,
+            name=name,
+            daemon=True,
+        )
+
+    def _run(self) -> None:
+        try:
+            deadline = time.monotonic()
+            while True:
+                self._target()
+                owner = getattr(self._target, "__self__", None)
+                if owner is not None and getattr(owner, "_ctrl_done", False):
+                    return
+                deadline += self._interval
+                delay = deadline - time.monotonic()
+                if delay > 0.0:
+                    time.sleep(delay)
+                else:
+                    missed = max(1, int(-delay / self._interval) + 1)
+                    deadline += missed * self._interval
+        except BaseException as exc:
+            self._exception = exc
+
+    def Start(self) -> None:
+        self._thread.start()
+
+    def Wait(self, timeout: float | None = None) -> None:
+        self._thread.join(timeout=timeout)
+
+    def raise_if_failed(self) -> None:
+        if self._exception is not None:
+            raise RuntimeError("dual-arm control thread failed") from self._exception
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -566,7 +638,9 @@ class DualArmController:
                  left_q0: list = None, right_q0: list = None,
                  enable_grip_check: bool = True,
                  grip_log_dir: str | None = None,
-                 grip_log_tag: str | None = None):
+                 grip_log_tag: str | None = None,
+                 grip_log_plot: bool = False,
+                 arm_runtime=None):
         """
         Args:
             left_target, right_target: 左右手目标位置 [x,y,z] (torso 系)
@@ -602,8 +676,12 @@ class DualArmController:
         self._enable_grip_check = enable_grip_check
         self._grip_log_dir = grip_log_dir
         self._grip_log_tag = grip_log_tag
+        self._arm_runtime = arm_runtime
+        self._runtime_state = None
         self._grip_metrics_log = (
-            GripMetricsLog(grip_log_dir) if enable_grip_check else None
+            GripMetricsLog(grip_log_dir, enable_plot=grip_log_plot)
+            if enable_grip_check
+            else None
         )
         self._grip_drop_count = 0
         self._grip_regrasp_count = 0
@@ -637,27 +715,35 @@ class DualArmController:
         self._stage_end_dispatched = False
 
         # DDS
-        self._low_cmd    = unitree_hg_msg_dds__LowCmd_()
+        self._low_cmd = None
         self._low_state  = None
         self._state_ready = False
-        self._crc        = CRC()
+        self._crc = None
+        if self._arm_runtime is None:
+            sdk = _legacy_sdk()
+            self._low_cmd = sdk.new_low_cmd()
+            self._crc = sdk.CRC()
         self._ctrl_thread = None
         self._ctrl_done = False
+        self._closed = False
 
-    def _stop_ctrl_thread(self) -> None:
+    def _stop_ctrl_thread(self, *, raise_error: bool = False) -> None:
         """停止 50Hz 控制线程。run() 返回后必须调用，否则下一轮会与 keeper/新 controller 双写 arm_sdk。"""
         if self._ctrl_thread is None:
             return
         self._ctrl_done = True
+        thread = self._ctrl_thread
         try:
-            self._ctrl_thread.Wait(timeout=1.0)
+            thread.Wait(timeout=1.0)
         except Exception:
             pass
         self._ctrl_thread = None
+        if raise_error:
+            thread.raise_if_failed()
 
     # ── DDS 回调 ─────────────────────────────────────────────────
 
-    def _on_low_state(self, msg: LowState_):
+    def _on_low_state(self, msg):
         self._low_state = msg
         if not self._state_ready:
             self._state_ready = True
@@ -665,6 +751,12 @@ class DualArmController:
     # ── 工具函数 ─────────────────────────────────────────────────
 
     def _read_q(self) -> list:
+        if self._arm_runtime is not None:
+            state = self._arm_runtime.latest_state(max_age_s=0.10)
+            if state is None:
+                state = self._arm_runtime.wait_state(timeout_s=2.0, max_age_s=0.10)
+            self._runtime_state = state
+            return list(state.q)
         return [self._low_state.motor_state[int(j)].q for j in ARM_JOINTS]
 
     def _kp_for_arm_index(self, arm_idx: int) -> float:
@@ -689,6 +781,17 @@ class DualArmController:
 
     def _sample_grip_tau(self) -> float | None:
         """返回 4 监测关节估计力矩绝对值的平均 (Nm)。无 state 时返回 None。"""
+        if self._arm_runtime is not None:
+            state = self._arm_runtime.latest_state(max_age_s=0.10)
+            if state is None:
+                return None
+            self._runtime_state = state
+            tau_vals = [
+                abs(float(state.tau_est[ARM_JOINTS.index(joint)]))
+                for joint in (G1Joint.LeftShoulderRoll, G1Joint.LeftElbow,
+                              G1Joint.RightShoulderRoll, G1Joint.RightElbow)
+            ]
+            return sum(tau_vals) / max(len(tau_vals), 1)
         if self._low_state is None:
             return None
         tau_vals: list[float] = []
@@ -924,7 +1027,7 @@ class DualArmController:
 
     def _print_joint_tracking_error(self, target_q: list, label: str) -> None:
         """对比目标关节角与 lowstate 实际值，打印逐关节误差。"""
-        if self._low_state is None:
+        if self._arm_runtime is None and self._low_state is None:
             print(f"[{label}] 无法读取 lowstate，跳过关节误差对比")
             return
         actual_q = self._read_q()
@@ -987,6 +1090,10 @@ class DualArmController:
         return list(ZERO_Q)
 
     def _publish(self, q_cmd: list, sdk_weight: float = 1.0):
+        if self._arm_runtime is not None:
+            self._arm_runtime.publish(q_cmd, weight=sdk_weight, profile="manip_v1")
+            return
+        assert self._low_cmd is not None and self._crc is not None
         st = self._low_state
         if st is not None:
             self._low_cmd.mode_machine = st.mode_machine
@@ -1259,17 +1366,24 @@ class DualArmController:
 
     def abort(self) -> None:
         """请求停止 50Hz 发布（Ctrl+C 等外部中断时调用）。"""
+        if self._closed:
+            return
         self._abort = True
         self._waiting_enter = False
         self.done = True
         self._stop_ctrl_thread()
         self._schedule_grip_metrics_save(event="abort")
-        if self._publisher is not None and self._state_ready:
+        if (
+            (self._arm_runtime is not None or self._publisher is not None)
+            and self._state_ready
+        ):
             try:
                 hold_q = self._read_q()
-                for _ in range(25):
+                frames = 1 if self._arm_runtime is not None else 25
+                for _ in range(frames):
                     self._publish(hold_q, sdk_weight=1.0)
-                    time.sleep(self._control_dt)
+                    if frames > 1:
+                        time.sleep(self._control_dt)
             except Exception:
                 pass
 
@@ -1313,21 +1427,33 @@ class DualArmController:
         torso 系点A；由 box_demo 拍照 + SAM3 提供。
         """
         self._regrasp_callback = regrasp_callback
-        self._publisher = ChannelPublisher("rt/arm_sdk", LowCmd_)
-        self._publisher.Init()
-        self._subscriber = ChannelSubscriber("rt/lowstate", LowState_)
-        self._subscriber.Init(self._on_low_state, 10)
+        if self._arm_runtime is not None:
+            self._runtime_state = self._arm_runtime.wait_state(
+                timeout_s=2.0,
+                max_age_s=0.10,
+            )
+            self._state_ready = True
+        else:
+            sdk = _legacy_sdk()
+            self._publisher = sdk.ChannelPublisher("rt/arm_sdk", sdk.LowCmd)
+            self._publisher.Init()
+            self._subscriber = sdk.ChannelSubscriber("rt/lowstate", sdk.LowState)
+            self._subscriber.Init(self._on_low_state, 10)
 
         print("\n等待机器人状态消息...")
-        while not self._state_ready:
+        deadline = time.monotonic() + 2.0
+        while not self._state_ready and time.monotonic() < deadline:
             time.sleep(0.05)
+        if not self._state_ready:
+            raise TimeoutError("2s 内未收到新鲜机器人状态")
         print("已收到机器人状态。\n")
 
         if release_external_hold is not None:
             release_external_hold()
 
         hold_q = self._read_q()
-        for _ in range(25):
+        handoff_frames = 1 if self._arm_runtime is not None else 25
+        for _ in range(handoff_frames):
             self._publish(hold_q, sdk_weight=1.0)
             time.sleep(self._control_dt)
 
@@ -1337,36 +1463,43 @@ class DualArmController:
             print("[  0.0s] 阶段1：当前位姿 → 零位")
 
         self._ctrl_done = False
-        self._ctrl_thread = RecurrentThread(
+        self._ctrl_thread = FixedRateThread(
             interval=self._control_dt,
             target=self._control_loop,
             name="dual_arm_ctrl",
         )
         self._ctrl_thread.Start()
 
-        while not self.done:
-            if self._waiting_enter:
-                self._wait_for_enter()
-                self._release_enter_and_advance()
-            if self.end_behavior == "hold_handoff" and self._stage == Stage.DONE:
-                break
-            time.sleep(0.05)
+        try:
+            while not self.done:
+                self._ctrl_thread.raise_if_failed()
+                if self._waiting_enter:
+                    self._wait_for_enter()
+                    self._release_enter_and_advance()
+                if self.end_behavior == "hold_handoff" and self._stage == Stage.DONE:
+                    break
+                time.sleep(0.05)
 
-        if self._abort:
-            self._stop_ctrl_thread()
-            return
+            if self._abort:
+                self._stop_ctrl_thread()
+                self._closed = True
+                return
 
-        if self.end_behavior == "hold_handoff":
-            handoff_q = list(self._release_q_cmd)
-            # keeper 先接管（controller 50Hz 仍在发相同 handoff_q），再停 controller 线程
-            if handoff_external_hold is not None:
-                handoff_external_hold(handoff_q)
-                time.sleep(0.12)
+            if self.end_behavior == "hold_handoff":
+                handoff_q = list(self._release_q_cmd)
+                # IPC 路径共用一个 lease；legacy 路径仍保持相同目标的短暂重叠。
+                if handoff_external_hold is not None:
+                    handoff_external_hold(handoff_q)
+                    time.sleep(0.12)
+                self._stop_ctrl_thread(raise_error=True)
+            else:
+                self._stop_ctrl_thread(raise_error=True)
+        except BaseException:
             self._stop_ctrl_thread()
-        else:
-            self._stop_ctrl_thread()
+            raise
 
         self._schedule_grip_metrics_save(event="final")
+        self._closed = True
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -1437,10 +1570,11 @@ def main():
     print("\n警告：运行前请确保机器人周围无障碍物，手臂可以自由活动！")
     input("按 Enter 开始执行，Ctrl+C 取消...\n")
 
+    sdk = _legacy_sdk()
     if args.iface:
-        ChannelFactoryInitialize(0, args.iface)
+        sdk.ChannelFactoryInitialize(0, args.iface)
     else:
-        ChannelFactoryInitialize(0)
+        sdk.ChannelFactoryInitialize(0)
 
     try:
         controller.run()

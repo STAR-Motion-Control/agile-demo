@@ -1,19 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""HTTP tool server skeleton for external agents.
+"""Cold HTTP ingress for the existing box demo.
 
-This file intentionally keeps the manipulation implementation thin:
-
-* ``manipulate_object(action="grasp")`` can launch the existing
-  ``box_demo_main.py`` as a subprocess when ``--allow-execute`` is set.
-* ``manipulate_object(action="place")`` is a documented stub.
-* ``query_holding`` returns a structured "unknown" response until the motor-state
-  monitor is wired in.
-* ``patrol_rotate`` can call the existing mover rotate API when
-  ``--allow-execute`` is set.
-
-The goal is to give agent/service integrators a stable HTTP surface without
-rewriting the current box demo manipulation loop.
+The server process deliberately imports only the Python standard library. Robot
+SDK, camera, perception, and IK modules are loaded only by a child process after
+an explicitly enabled request. Exactly one motion child may exist at a time.
 """
 
 from __future__ import annotations
@@ -22,19 +13,58 @@ import argparse
 import json
 import math
 import os
+import shlex
+import signal
 import subprocess
 import sys
 import threading
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from typing import Any
 from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parent
+TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "rejected", "cancelled", "timed_out"}
+)
+
+# This source is interpreted only in a patrol child process. Keeping it as data
+# here prevents mover imports (and their DDS dependencies) in the waiting server.
+PATROL_CHILD_CODE = r"""
+import signal
+import sys
+
+backend, ipc_url, velocity_text, angle_text, speed_text = sys.argv[1:]
+if backend == "groot":
+    from groot_mover import GrootMover
+    mover = GrootMover()
+elif backend == "remote":
+    from remote_mover import RemoteMover
+    mover = RemoteMover(ipc_url)
+else:
+    from robot_move import RobotMover
+    mover = RobotMover(velocity=float(velocity_text))
+
+def stop_then_exit(signum, _frame):
+    try:
+        mover.stop()
+    finally:
+        raise SystemExit(128 + signum)
+
+signal.signal(signal.SIGTERM, stop_then_exit)
+try:
+    mover.initialize()
+    if speed_text:
+        mover.rotate(float(angle_text), yaw_speed=float(speed_text))
+    else:
+        mover.rotate(float(angle_text))
+finally:
+    mover.stop()
+"""
 
 
 def now_iso() -> str:
@@ -67,6 +97,8 @@ class ServerConfig:
     no_vision_log: bool
     walk_scale: float
     walk_velocity: float
+    job_timeout_seconds: float = 900.0
+    terminate_grace_seconds: float = 3.0
     extra_box_args: list[str] = field(default_factory=list)
 
 
@@ -91,7 +123,7 @@ class ToolRequest:
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "message": self.message,
-            "details": self.details,
+            "details": dict(self.details),
         }
         if self.action is not None:
             out["action"] = self.action
@@ -104,10 +136,25 @@ class ToolRequest:
 
 class ToolService:
     def __init__(self, config: ServerConfig):
+        if (
+            not math.isfinite(config.job_timeout_seconds)
+            or config.job_timeout_seconds <= 0
+        ):
+            raise ValueError("job_timeout_seconds must be greater than zero")
+        if (
+            not math.isfinite(config.terminate_grace_seconds)
+            or config.terminate_grace_seconds <= 0
+        ):
+            raise ValueError("terminate_grace_seconds must be greater than zero")
         self.config = config
         self._lock = threading.RLock()
         self._requests: dict[str, ToolRequest] = {}
         self._active_request_id: str | None = None
+        self._active_process: subprocess.Popen | None = None
+        self._worker_thread: threading.Thread | None = None
+        self._cancel_requested: set[str] = set()
+        self._closing = False
+        self._closed = False
         self._seq = 0
         self._state = "idle"
         self._holding: dict[str, Any] = {
@@ -131,6 +178,7 @@ class ToolService:
                 "ok": True,
                 "state": self._state,
                 "allow_execute": self.config.allow_execute,
+                "closing": self._closing,
                 "active_request": active,
                 "holding": dict(self._holding),
                 "tools": [
@@ -144,6 +192,106 @@ class ToolService:
         with self._lock:
             req = self._requests.get(request_id)
             return req.to_dict() if req is not None else None
+
+    def cancel_request(self, request_id: str) -> tuple[int, dict[str, Any]]:
+        """Request cancellation and synchronously stop the active process group."""
+        with self._lock:
+            req = self._requests.get(request_id)
+            if req is None:
+                return 404, {
+                    "status": "failed",
+                    "error_code": "NOT_FOUND",
+                    "message": "request not found",
+                }
+            if req.status in TERMINAL_STATUSES:
+                return 409, {
+                    "status": "rejected",
+                    "error_code": "NOT_ACTIVE",
+                    "message": f"request is already {req.status}",
+                    "request_id": request_id,
+                }
+            if self._active_request_id != request_id:
+                return 409, {
+                    "status": "rejected",
+                    "error_code": "NOT_ACTIVE",
+                    "message": "request is not the active motion request",
+                    "request_id": request_id,
+                }
+
+            self._cancel_requested.add(request_id)
+            req.status = "cancelling"
+            req.message = "cancellation requested"
+            req.details["cancel_requested_at"] = now_iso()
+            req.updated_at = now_iso()
+            proc = self._active_process
+
+        stopped = proc is None or self._terminate_process(proc)
+        if stopped:
+            with self._lock:
+                worker = self._worker_thread
+                if (
+                    proc is not None
+                    and self._active_process is proc
+                    and (worker is None or not worker.is_alive())
+                ):
+                    self._active_process = None
+                    self._finish_request(
+                        request_id,
+                        "cancelled",
+                        "child process was cancelled and reaped",
+                        error_code="CANCELLED",
+                        details={"returncode": proc.returncode},
+                    )
+        current = self.get_request(request_id)
+        assert current is not None
+        return 202, current
+
+    def close(self) -> None:
+        """Reject new work and stop/reap the sole child process, if one exists."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closing = True
+            self._state = "stopping"
+            request_id = self._active_request_id
+            if request_id is not None:
+                self._cancel_requested.add(request_id)
+                req = self._requests.get(request_id)
+                if req is not None and req.status not in TERMINAL_STATUSES:
+                    req.status = "cancelling"
+                    req.message = "service shutdown requested"
+                    req.details["cancel_requested_at"] = now_iso()
+                    req.updated_at = now_iso()
+            proc = self._active_process
+            worker = self._worker_thread
+
+        stopped = proc is None or self._terminate_process(proc)
+        if worker is not None and worker is not threading.current_thread():
+            worker.join(timeout=max(5.0, self.config.terminate_grace_seconds * 3 + 1))
+
+        with self._lock:
+            if (
+                stopped
+                and request_id is not None
+                and self._active_request_id == request_id
+                and (self._worker_thread is None or not self._worker_thread.is_alive())
+            ):
+                if self._active_process is proc:
+                    self._active_process = None
+                self._finish_request(
+                    request_id,
+                    "cancelled",
+                    "child process was cancelled during service shutdown",
+                    error_code="CANCELLED",
+                    details={
+                        "returncode": proc.returncode if proc is not None else None
+                    },
+                )
+            if self._active_request_id is None:
+                self._state = "closed"
+                self._closed = True
+            else:
+                self._state = "shutdown_incomplete"
 
     def manipulate_object(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         action = str(payload.get("action", "")).strip().lower()
@@ -180,7 +328,14 @@ class ToolService:
             )
             return 403, self.get_request(req.request_id)
 
+        command = self._build_box_demo_cmd(item_text)
         with self._lock:
+            if self._closing:
+                return 503, {
+                    "status": "rejected",
+                    "error_code": "SHUTTING_DOWN",
+                    "message": "service is shutting down",
+                }
             if self._active_request_id is not None:
                 return 409, {
                     "status": "rejected",
@@ -194,15 +349,28 @@ class ToolService:
             req.status = "accepted"
             req.message = "box_demo_main.py launch accepted"
             req.details["mode"] = "subprocess"
+            req.details["timeout_seconds"] = self.config.job_timeout_seconds
             req.updated_at = now_iso()
-
-        thread = threading.Thread(
-            target=self._run_box_demo_grasp,
-            args=(req.request_id, item_text),
-            name=f"tool-{req.request_id}",
-            daemon=True,
-        )
-        thread.start()
+            thread = threading.Thread(
+                target=self._run_subprocess,
+                args=(req.request_id, command),
+                name=f"tool-{req.request_id}",
+                daemon=True,
+            )
+            self._worker_thread = thread
+            try:
+                thread.start()
+            except RuntimeError as exc:
+                self._worker_thread = None
+                self._finish_request(
+                    req.request_id,
+                    "failed",
+                    f"failed to start worker thread: {exc}",
+                    error_code="WORKER_START_ERROR",
+                )
+                current = self.get_request(req.request_id)
+                assert current is not None
+                return 500, current
         return 202, self.get_request(req.request_id)
 
     def query_holding(self) -> tuple[int, dict[str, Any]]:
@@ -218,6 +386,12 @@ class ToolService:
                 "error_code": "BAD_REQUEST",
                 "message": "angle_deg must be a number",
             }
+        if not math.isfinite(angle_deg):
+            return 400, {
+                "status": "failed",
+                "error_code": "BAD_REQUEST",
+                "message": "angle_deg must be finite",
+            }
         speed_deg_s = payload.get("speed_deg_s")
         try:
             speed_rad_s = (
@@ -228,6 +402,14 @@ class ToolService:
                 "status": "failed",
                 "error_code": "BAD_REQUEST",
                 "message": "speed_deg_s must be a number when provided",
+            }
+        if speed_rad_s is not None and (
+            not math.isfinite(speed_rad_s) or speed_rad_s <= 0
+        ):
+            return 400, {
+                "status": "failed",
+                "error_code": "BAD_REQUEST",
+                "message": "speed_deg_s must be finite and greater than zero",
             }
 
         if not self.config.allow_execute:
@@ -241,7 +423,14 @@ class ToolService:
             )
             return 403, self.get_request(req.request_id)
 
+        command = self._build_patrol_cmd(math.radians(angle_deg), speed_rad_s)
         with self._lock:
+            if self._closing:
+                return 503, {
+                    "status": "rejected",
+                    "error_code": "SHUTTING_DOWN",
+                    "message": "service is shutting down",
+                }
             if self._active_request_id is not None:
                 return 409, {
                     "status": "rejected",
@@ -255,17 +444,31 @@ class ToolService:
             req.details = {
                 "angle_deg": angle_deg,
                 "backend": self.config.locomotion,
+                "mode": "subprocess",
+                "timeout_seconds": self.config.job_timeout_seconds,
             }
             self._active_request_id = req.request_id
             self._state = "manipulating"
-
-        thread = threading.Thread(
-            target=self._run_patrol_rotate,
-            args=(req.request_id, math.radians(angle_deg), speed_rad_s),
-            name=f"tool-{req.request_id}",
-            daemon=True,
-        )
-        thread.start()
+            thread = threading.Thread(
+                target=self._run_subprocess,
+                args=(req.request_id, command),
+                name=f"tool-{req.request_id}",
+                daemon=True,
+            )
+            self._worker_thread = thread
+            try:
+                thread.start()
+            except RuntimeError as exc:
+                self._worker_thread = None
+                self._finish_request(
+                    req.request_id,
+                    "failed",
+                    f"failed to start worker thread: {exc}",
+                    error_code="WORKER_START_ERROR",
+                )
+                current = self.get_request(req.request_id)
+                assert current is not None
+                return 500, current
         return 202, self.get_request(req.request_id)
 
     # ----------------------------------------------------------------- helpers
@@ -311,19 +514,12 @@ class ToolService:
             req.error_code = error_code
             if details:
                 req.details.update(details)
+            req.details.setdefault("finished_at", now_iso())
             req.updated_at = now_iso()
             if self._active_request_id == request_id:
                 self._active_request_id = None
-                self._state = "idle" if status in ("succeeded", "failed") else self._state
-
-    def _mark_running(self, request_id: str, message: str) -> None:
-        with self._lock:
-            req = self._requests.get(request_id)
-            if req is None:
-                return
-            req.status = "running"
-            req.message = message
-            req.updated_at = now_iso()
+                self._state = "stopping" if self._closing else "idle"
+            self._cancel_requested.discard(request_id)
 
     def _build_box_demo_cmd(self, item_text: str) -> list[str]:
         cfg = self.config
@@ -340,6 +536,7 @@ class ToolService:
             str(cfg.sam3_port),
             "--locomotion",
             cfg.locomotion,
+            "--single-run",
             "--max-attempts",
             str(cfg.max_attempts),
             "--walk-scale",
@@ -366,42 +563,151 @@ class ToolService:
         cmd.extend(cfg.extra_box_args)
         return cmd
 
-    def _run_box_demo_grasp(self, request_id: str, item_text: str) -> None:
-        cmd = self._build_box_demo_cmd(item_text)
-        self._mark_running(request_id, "box_demo_main.py subprocess is running")
+    def _build_patrol_cmd(
+        self, angle_rad: float, speed_rad_s: float | None
+    ) -> list[str]:
+        cfg = self.config
+        return [
+            cfg.python,
+            "-c",
+            PATROL_CHILD_CODE,
+            cfg.locomotion,
+            cfg.ipc_url,
+            str(cfg.walk_velocity),
+            str(angle_rad),
+            "" if speed_rad_s is None else str(speed_rad_s),
+        ]
+
+    def _run_subprocess(self, request_id: str, command: list[str]) -> None:
         with self._lock:
             req = self._requests.get(request_id)
-            if req is not None:
-                req.details["command"] = cmd
-                req.details["note"] = (
-                    "box_demo_main.py is still interactive in several phases; "
-                    "this wrapper only launches and monitors the process."
+            if req is None:
+                return
+            if self._closing or request_id in self._cancel_requested:
+                self._finish_request(
+                    request_id,
+                    "cancelled",
+                    "request cancelled before child launch",
+                    error_code="CANCELLED",
                 )
-                req.updated_at = now_iso()
+                self._worker_thread = None
+                return
+            req.status = "running"
+            req.message = f"{req.tool} child process is running"
+            req.details["command"] = list(command)
+            req.details["started_at"] = now_iso()
+            req.updated_at = now_iso()
+
+        proc: subprocess.Popen | None = None
         try:
-            proc = subprocess.Popen(cmd, cwd=str(ROOT))
+            proc = subprocess.Popen(
+                command,
+                cwd=str(ROOT),
+                stdin=subprocess.DEVNULL,
+                start_new_session=(os.name == "posix"),
+            )
             with self._lock:
+                self._active_process = proc
                 req = self._requests.get(request_id)
                 if req is not None:
                     req.details["pid"] = proc.pid
                     req.updated_at = now_iso()
-            rc = proc.wait()
+                should_cancel = (
+                    self._closing or request_id in self._cancel_requested
+                )
+            if should_cancel:
+                if not self._terminate_process(proc):
+                    self._mark_cleanup_failed(
+                        request_id,
+                        "child process did not stop after cancellation escalation",
+                    )
+                    return
+
+            timed_out = False
+            try:
+                rc = proc.wait(timeout=self.config.job_timeout_seconds)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                with self._lock:
+                    req = self._requests.get(request_id)
+                    if req is not None:
+                        req.status = "timing_out"
+                        req.message = "child exceeded its execution timeout"
+                        req.updated_at = now_iso()
+                if not self._terminate_process(proc):
+                    self._mark_cleanup_failed(
+                        request_id,
+                        "child process did not stop after timeout escalation",
+                    )
+                    return
+                rc = proc.poll()
+                if rc is None:
+                    raise RuntimeError("child process could not be reaped after timeout")
         except Exception as exc:
-            self._finish_request(
-                request_id,
-                "failed",
-                f"failed to launch box_demo_main.py: {exc}",
-                error_code="SUBPROCESS_ERROR",
-            )
+            if proc is not None and proc.poll() is None:
+                if not self._terminate_process(proc):
+                    self._mark_cleanup_failed(
+                        request_id,
+                        f"child process error and cleanup failed: {exc}",
+                    )
+                    return
+            with self._lock:
+                if self._active_process is proc:
+                    self._active_process = None
+                if self._worker_thread is threading.current_thread():
+                    self._worker_thread = None
+                if request_id in self._cancel_requested or self._closing:
+                    self._finish_request(
+                        request_id,
+                        "cancelled",
+                        "child process was cancelled and reaped",
+                        error_code="CANCELLED",
+                        details={
+                            "returncode": proc.returncode if proc is not None else None
+                        },
+                    )
+                else:
+                    self._finish_request(
+                        request_id,
+                        "failed",
+                        f"failed to launch child process: {exc}",
+                        error_code="SUBPROCESS_ERROR",
+                    )
             return
 
-        if rc == 0:
-            with self._lock:
+        with self._lock:
+            if self._active_process is proc:
+                self._active_process = None
+            was_cancelled = (
+                self._closing or request_id in self._cancel_requested
+            )
+            req = self._requests.get(request_id)
+            tool = req.tool if req is not None else ""
+            if was_cancelled:
+                self._finish_request(
+                    request_id,
+                    "cancelled",
+                    "child process was cancelled and reaped",
+                    error_code="CANCELLED",
+                    details={"returncode": rc},
+                )
+            elif timed_out:
+                self._finish_request(
+                    request_id,
+                    "timed_out",
+                    (
+                        "child process exceeded "
+                        f"{self.config.job_timeout_seconds:g} seconds and was reaped"
+                    ),
+                    error_code="TIMEOUT",
+                    details={"returncode": rc},
+                )
+            elif rc == 0 and tool == "manipulate_object":
                 self._holding.update(
                     {
                         "holding": "unknown",
                         "confidence": "low",
-                        "item_text": item_text,
+                        "item_text": req.item_text if req is not None else None,
                         "source": "box_demo_subprocess_exit",
                         "message": (
                             "box_demo_main.py exited successfully; holding monitor "
@@ -409,60 +715,82 @@ class ToolService:
                         ),
                     }
                 )
-            self._finish_request(
-                request_id,
-                "succeeded",
-                "box_demo_main.py exited successfully",
-                details={"returncode": rc},
-            )
-        else:
-            self._finish_request(
-                request_id,
-                "failed",
-                f"box_demo_main.py exited with code {rc}",
-                error_code="BOX_DEMO_EXITED_NONZERO",
-                details={"returncode": rc},
-            )
-
-    def _run_patrol_rotate(
-        self, request_id: str, angle_rad: float, speed_rad_s: float | None
-    ) -> None:
-        self._mark_running(request_id, "rotation command is running")
-        try:
-            mover = self._make_mover()
-            mover.initialize()
-            if speed_rad_s is None:
-                mover.rotate(angle_rad)
+                self._finish_request(
+                    request_id,
+                    "succeeded",
+                    "box_demo_main.py exited successfully",
+                    details={"returncode": rc},
+                )
+            elif rc == 0:
+                self._finish_request(
+                    request_id,
+                    "succeeded",
+                    "rotation child process exited successfully",
+                    details={"returncode": rc},
+                )
             else:
-                mover.rotate(angle_rad, yaw_speed=speed_rad_s)
-        except Exception as exc:
-            self._finish_request(
-                request_id,
-                "failed",
-                f"rotation failed: {exc}",
-                error_code="LOCOMOTION_ERROR",
-            )
+                self._finish_request(
+                    request_id,
+                    "failed",
+                    f"child process exited with code {rc}",
+                    error_code=(
+                        "BOX_DEMO_EXITED_NONZERO"
+                        if tool == "manipulate_object"
+                        else "LOCOMOTION_EXITED_NONZERO"
+                    ),
+                    details={"returncode": rc},
+                )
+            if self._worker_thread is threading.current_thread():
+                self._worker_thread = None
+
+    def _mark_cleanup_failed(self, request_id: str, message: str) -> None:
+        with self._lock:
+            req = self._requests.get(request_id)
+            if req is not None:
+                req.status = "cleanup_failed"
+                req.message = message
+                req.error_code = "PROCESS_STILL_RUNNING"
+                req.updated_at = now_iso()
+            self._state = "cleanup_failed"
+            if self._worker_thread is threading.current_thread():
+                self._worker_thread = None
+
+    def _terminate_process(self, proc: subprocess.Popen) -> bool:
+        """Stop the whole child session, preferring cooperative Python cleanup."""
+        if proc.poll() is not None:
+            return True
+        grace = self.config.terminate_grace_seconds
+        signals = [signal.SIGINT, signal.SIGTERM]
+        for sig in signals:
+            self._signal_process_group(proc, sig)
+            try:
+                proc.wait(timeout=grace)
+                return True
+            except subprocess.TimeoutExpired:
+                continue
+        self._signal_process_group(proc, signal.SIGKILL)
+        try:
+            proc.wait(timeout=max(1.0, grace))
+            return True
+        except subprocess.TimeoutExpired:
+            return False
+
+    @staticmethod
+    def _signal_process_group(proc: subprocess.Popen, sig: signal.Signals) -> None:
+        if proc.poll() is not None:
             return
-        self._finish_request(
-            request_id,
-            "succeeded",
-            "rotation command completed",
-            details={"angle_deg": math.degrees(angle_rad)},
-        )
-
-    def _make_mover(self):
-        cfg = self.config
-        if cfg.locomotion == "groot":
-            from groot_mover import GrootMover
-
-            return GrootMover()
-        if cfg.locomotion == "remote":
-            from remote_mover import RemoteMover
-
-            return RemoteMover(cfg.ipc_url)
-        from robot_move import RobotMover
-
-        return RobotMover(velocity=cfg.walk_velocity)
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, sig)
+            else:
+                proc.send_signal(sig)
+        except ProcessLookupError:
+            return
+        except OSError:
+            try:
+                proc.send_signal(sig)
+            except (OSError, ProcessLookupError):
+                return
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -532,6 +860,21 @@ class Handler(BaseHTTPRequestHandler):
             return
         assert payload is not None
 
+        if path.startswith("/requests/") and path.endswith("/cancel"):
+            parts = path.split("/")
+            if len(parts) != 4 or not parts[2]:
+                self._json(
+                    {
+                        "status": "failed",
+                        "error_code": "BAD_REQUEST",
+                        "message": "expected /requests/<request_id>/cancel",
+                    },
+                    status=400,
+                )
+                return
+            status, body = self.service.cancel_request(parts[2])
+            self._json(body, status=status)
+            return
         if path == "/tools/manipulate_object":
             status, body = self.service.manipulate_object(payload)
             self._json(body, status=status)
@@ -548,6 +891,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class ToolHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    block_on_close = True
+
+    def server_bind(self) -> None:
+        # HTTPServer.server_bind() performs a reverse-DNS lookup only to fill
+        # server_name. It can stall cold start for tens of seconds on an
+        # isolated onboard network, while this JSON service never uses it.
+        TCPServer.server_bind(self)
+        self.server_name = str(self.server_address[0])
+        self.server_port = int(self.server_address[1])
+
     def __init__(self, server_address, handler, service: ToolService):
         super().__init__(server_address, handler)
         self.service = service
@@ -556,12 +910,19 @@ class ToolHTTPServer(ThreadingHTTPServer):
 def parse_extra_box_args(raw: str) -> list[str]:
     if not raw:
         return []
-    return [part for part in raw.split(" ") if part]
+    return shlex.split(raw)
+
+
+def positive_float(raw: str) -> float:
+    value = float(raw)
+    if value <= 0 or not math.isfinite(value):
+        raise argparse.ArgumentTypeError("must be a finite number greater than zero")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="HTTP agent tool server for box_demo_2")
-    p.add_argument("--host", default="0.0.0.0")
+    p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=5055)
     p.add_argument(
         "--allow-execute",
@@ -585,6 +946,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-vision-log", action="store_true")
     p.add_argument("--walk-scale", type=float, default=1.0)
     p.add_argument("--walk-velocity", type=float, default=0.7)
+    p.add_argument(
+        "--job-timeout-seconds",
+        type=positive_float,
+        default=900.0,
+        help="maximum wall time for one child process (default: 900)",
+    )
+    p.add_argument(
+        "--terminate-grace-seconds",
+        type=positive_float,
+        default=3.0,
+        help="grace after SIGINT/SIGTERM before escalation (default: 3)",
+    )
     p.add_argument(
         "--extra-box-args",
         default="",
@@ -616,21 +989,27 @@ def main() -> None:
         no_vision_log=args.no_vision_log,
         walk_scale=args.walk_scale,
         walk_velocity=args.walk_velocity,
+        job_timeout_seconds=args.job_timeout_seconds,
+        terminate_grace_seconds=args.terminate_grace_seconds,
         extra_box_args=parse_extra_box_args(args.extra_box_args),
     )
     service = ToolService(config)
     httpd = ToolHTTPServer((config.host, config.port), Handler, service)
     print(f"box_agent_tools_server listening on http://{config.host}:{config.port}")
     print(f"allow_execute={config.allow_execute} locomotion={config.locomotion}")
-    print("endpoints: /health /status /requests/<id> /tools/manipulate_object /tools/query_holding /tools/patrol_rotate")
+    print(
+        "endpoints: /health /status /requests/<id> "
+        "/requests/<id>/cancel /tools/manipulate_object "
+        "/tools/query_holding /tools/patrol_rotate"
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         print("\nbox_agent_tools_server exiting")
     finally:
+        service.close()
         httpd.server_close()
 
 
 if __name__ == "__main__":
     main()
-

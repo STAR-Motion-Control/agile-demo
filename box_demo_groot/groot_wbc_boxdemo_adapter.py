@@ -16,10 +16,12 @@ only publishes rt/lowcmd_rl so the original arm_sdk overlay still works.
 from __future__ import annotations
 
 import argparse
+import atexit
 import ctypes
 import json
 import math
 import os
+import signal
 import sys
 import time
 import dataclasses
@@ -29,10 +31,21 @@ from typing import Any
 
 import numpy as np
 
+REFACTOR_ROOT = Path(__file__).resolve().parent.parent
+if str(REFACTOR_ROOT) not in sys.path:
+    sys.path.insert(0, str(REFACTOR_ROOT))
+
+from onboard_runtime.loop_health import ControlLoopHealthReporter
+from onboard_runtime.command_stream import (
+    DEFAULT_ADAPTER_COMMAND_SOCKET,
+    LatestCommandReceiver,
+)
+
 from adaptive_taptap import AdaptiveTapTapController, StanceMetrics
 
 CMD_FILE = "/tmp/robojudo_ext_cmd.json"
 TAPTAP_STATUS_FILE = "/tmp/groot_taptap_status.json"
+RUNTIME_HEALTH_FILE = "/tmp/groot_adapter_health.json"
 
 DEFAULT_BASE_HEIGHT = 0.74
 DEFAULT_MIN_HEIGHT = 0.30
@@ -256,6 +269,31 @@ def read_external_command(
 
     age = now - float(raw.get("timestamp", 0.0))
     fresh = age <= stale_s
+    return parse_external_command(
+        raw,
+        fresh=fresh,
+        last_height=last_height,
+        fwd_max=fwd_max,
+        lat_max=lat_max,
+        yaw_max=yaw_max,
+        min_height=min_height,
+        max_height=max_height,
+    )
+
+
+def parse_external_command(
+    raw: dict[str, Any] | None,
+    *,
+    fresh: bool,
+    last_height: float,
+    fwd_max: float,
+    lat_max: float,
+    yaw_max: float,
+    min_height: float,
+    max_height: float,
+) -> ExternalCommand:
+    if not isinstance(raw, dict):
+        return ExternalCommand("RL_FULL", 0.0, 0.0, 0.0, last_height, False)
     fsm = str(raw.get("fsm") or "RL_FULL")
     height = clamp(float(raw.get("height", last_height)), min_height, max_height)
 
@@ -267,7 +305,7 @@ def read_external_command(
 
     if not fresh or fsm == "RL_LOWER":
         return ExternalCommand(
-            fsm, 0.0, 0.0, 0.0, height, fresh,
+            fsm, 0.0, 0.0, 0.0, last_height if not fresh else height, fresh,
             allow_recovery=bool(raw.get("allow_recovery", False)),
             defer_recovery=bool(raw.get("defer_recovery", False)),
         )
@@ -466,6 +504,100 @@ def _latest_low_state(env):
         return None
 
 
+def publish_shutdown_action(
+    *,
+    action: str,
+    duration_s: float,
+    hz: float,
+    damping_kd: float,
+    dry_run: bool,
+    publisher,
+    env,
+    sleep_fn=time.sleep,
+) -> int:
+    """Best-effort publication of the configured adapter shutdown frame.
+
+    A transient DDS or low-state read failure must not abort the remaining
+    attempts.  The caller can therefore invoke this while another exception is
+    already propagating without replacing that original failure.
+    """
+    if dry_run or action == "none":
+        return 0
+
+    attempts = max(1, int(max(0.0, float(duration_s)) * float(hz)))
+    period_s = 1.0 / max(1.0, float(hz))
+    published = 0
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            if action == "limp":
+                publisher.publish_limp()
+            elif action == "damp":
+                low_state = _latest_low_state(env)
+                if low_state is None:
+                    publisher.publish_limp()
+                else:
+                    try:
+                        publisher.publish_damping(low_state, damping_kd)
+                    except Exception as damp_exc:
+                        last_error = damp_exc
+                        publisher.publish_limp()
+            else:
+                raise ValueError(f"unsupported shutdown action: {action}")
+            published += 1
+        except Exception as exc:
+            last_error = exc
+            if attempt == 0:
+                print(f"[WARN] shutdown {action} publish failed; retrying: {exc}")
+
+        if attempt + 1 < attempts:
+            try:
+                sleep_fn(period_s)
+            except Exception as exc:
+                # Timing failure is non-fatal here; keep attempting the safety
+                # frame rather than replacing the exception that led us here.
+                last_error = exc
+
+    if published == 0:
+        print(
+            f"[ERROR] shutdown {action} could not be published "
+            f"after {attempts} attempt(s): {last_error}"
+        )
+    elif published < attempts:
+        print(
+            f"[WARN] shutdown {action} published {published}/{attempts} frame(s); "
+            f"last error: {last_error}"
+        )
+    return published
+
+
+def publish_runtime_safety_frame(
+    *,
+    command: ExternalCommand,
+    publisher,
+    env,
+    damping_kd: float,
+    dry_run: bool,
+) -> str:
+    """Publish safety without depending on policy observation or inference."""
+    requested = "LIMP" if command.fsm == "LIMP" else "DAMP"
+    if dry_run:
+        return requested
+    if requested == "LIMP":
+        publisher.publish_limp()
+        return "LIMP"
+    low_state = _latest_low_state(env)
+    if low_state is None:
+        publisher.publish_limp()
+        return "LIMP"
+    try:
+        publisher.publish_damping(low_state, damping_kd)
+        return "DAMP"
+    except Exception:
+        publisher.publish_limp()
+        return "LIMP"
+
+
 def measure_stance(robot_model, q) -> StanceMetrics:
     """Measure ankle-center geometry in the pelvis yaw frame."""
     robot_model.cache_forward_kinematics(q, auto_clip=False)
@@ -491,6 +623,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--interface", "--iface", dest="interface", default=os.environ.get("UNITREE_DDS_INTERFACE", "real"))
     p.add_argument("--domain", type=int, default=0)
     p.add_argument("--cmd-file", type=Path, default=Path(CMD_FILE))
+    p.add_argument(
+        "--runtime-command-socket",
+        default=os.environ.get(
+            "GROOT_ADAPTER_COMMAND_SOCKET",
+            DEFAULT_ADAPTER_COMMAND_SOCKET,
+        ),
+        help="latest-only broker command stream; empty string uses legacy --cmd-file",
+    )
     p.add_argument("--taptap-status-file", type=Path, default=Path(TAPTAP_STATUS_FILE),
                    help="自适应回正状态文件，供HTTP/local mover条件等待")
     p.add_argument("--publish-topic", default="rt/lowcmd_rl")
@@ -584,7 +724,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--high-elbow-pose", action="store_true")
     p.add_argument("--damping-kd", type=float, default=8.0)
     p.add_argument("--shutdown-action", choices=("limp", "damp", "none"), default="limp",
-                   help="command sent when this adapter exits by Ctrl+C")
+                   help="command sent when this adapter exits or its main loop fails")
     p.add_argument("--shutdown-s", type=float, default=1.0, help="seconds to publish shutdown command")
     p.add_argument("--torch-threads", type=int, default=int(os.environ.get("TORCH_THREADS", "1")))
     p.add_argument("--dry-run", action="store_true", help="compute policy but do not publish rt/lowcmd_rl")
@@ -598,6 +738,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="H 期间手臂观测向训练默认姿态回退的比例 0..1；"
                         "真机默认 0 使用真实 q/dq，非零值仅用于显式 A/B 诊断")
     p.add_argument("--print-every-s", type=float, default=1.0)
+    p.add_argument("--runtime-health-file", default=RUNTIME_HEALTH_FILE,
+                   help="control-loop health JSON consumed by the motion bus")
+    p.add_argument("--health-p99-max-ms", type=float, default=40.0,
+                   help="block nonzero motion when control-loop p99 exceeds this")
+    p.add_argument("--health-max-gap-ms", type=float, default=60.0,
+                   help="block nonzero motion after any control-loop gap exceeds this")
+    p.add_argument("--health-min-samples", type=int, default=10)
+    p.add_argument("--disable-runtime-health", action="store_true")
     p.add_argument("--log-pose", type=Path, default=None,
                    help="append sim ground-truth floating_base_pose to a CSV each "
                         "tick (for open-loop precision tests; sim only)")
@@ -606,6 +754,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_arg_parser().parse_args()
+    command_receiver = None
+    if args.runtime_command_socket:
+        command_receiver = LatestCommandReceiver(args.runtime_command_socket)
+        command_receiver.bind()
+    health_reporter = None
+    if not args.disable_runtime_health:
+        health_reporter = ControlLoopHealthReporter(
+            args.runtime_health_file,
+            expected_period_s=1.0 / float(args.hz),
+            p99_max_s=float(args.health_p99_max_ms) / 1000.0,
+            max_gap_s=float(args.health_max_gap_ms) / 1000.0,
+            min_samples=int(args.health_min_samples),
+        )
 
     os.environ.setdefault("OMP_NUM_THREADS", str(args.torch_threads))
     os.environ.setdefault("MKL_NUM_THREADS", str(args.torch_threads))
@@ -620,6 +781,7 @@ def main() -> None:
 
     # DDS init 只做一次: 交给 G1Env(带 wbc_config[INTERFACE]=args.interface).
     # 捆绑版 sdk2py 的 ChannelFactoryInitialize 不幂等, 这里再 init 会 create-domain 冲突.
+    stop_reason = "adapter_stopped"
     try:
         torch.set_num_interop_threads(1)
     except RuntimeError:
@@ -672,6 +834,35 @@ def main() -> None:
         _activate_policy_once(wbc_policy)
 
     publisher = LowCmdRlPublisher(wbc_config=wbc_config, topic=args.publish_topic)
+    shutdown_guard = {"done": False}
+
+    def emergency_shutdown() -> None:
+        if shutdown_guard["done"]:
+            return
+        shutdown_guard["done"] = True
+        try:
+            publish_shutdown_action(
+                action=args.shutdown_action,
+                duration_s=args.shutdown_s,
+                hz=args.hz,
+                damping_kd=args.damping_kd,
+                dry_run=args.dry_run,
+                publisher=publisher,
+                env=env,
+            )
+        except BaseException as shutdown_exc:
+            print(f"[ERROR] emergency adapter shutdown failed: {shutdown_exc}")
+
+    atexit.register(emergency_shutdown)
+    previous_signal_handlers = {}
+
+    def request_signal_shutdown(signum, _frame) -> None:
+        emergency_shutdown()
+        raise KeyboardInterrupt(f"received signal {signum}")
+
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        previous_signal_handlers[signum] = signal.getsignal(signum)
+        signal.signal(signum, request_signal_shutdown)
     arm_indices = np.asarray(robot_model.get_joint_group_indices("arms"), dtype=int)
     default_arm_q = np.asarray(robot_model.get_default_body_pose())[arm_indices]
     arm_observation_compensation = clamp(
@@ -777,7 +968,10 @@ def main() -> None:
     print("GR00T-WBC adapter for box_demo_2")
     print(f"  repo:        {args.groot_repo.expanduser().resolve()}")
     print(f"  interface:   {config.interface} ({config.env_type}), domain={args.domain}")
-    print(f"  cmd file:    {args.cmd_file}")
+    if command_receiver is not None:
+        print(f"  cmd stream:  {args.runtime_command_socket} (latest-only UDS)")
+    else:
+        print(f"  cmd file:    {args.cmd_file} (legacy A/B)")
     print(f"  publish:     {'DRY-RUN' if args.dry_run else args.publish_topic} @ {args.hz:.1f}Hz")
     print(f"  limits:      fwd={fwd_max_eff:.2f}(硬顶{FWD_VX_HARD:.1f}) "
           f"back={BACK_VX_MAX:.2f}(固定) lat={lat_max_eff:.2f} yaw={yaw_max_eff:.2f}")
@@ -813,16 +1007,33 @@ def main() -> None:
             if env.sim and config.sim_sync_mode:
                 env.step_simulator()
 
-            cmd = read_external_command(
-                cmd_file=args.cmd_file,
-                last_height=height_cmd,
-                stale_s=float(args.cmd_stale_s),
-                fwd_max=fwd_max_eff,
-                lat_max=lat_max_eff,
-                yaw_max=yaw_max_eff,
-                min_height=float(args.min_height),
-                max_height=float(args.max_height),
-            )
+            if command_receiver is not None:
+                command_receiver.drain()
+                raw_command, command_fresh = command_receiver.latest(
+                    now=t0,
+                    stale_s=float(args.cmd_stale_s),
+                )
+                cmd = parse_external_command(
+                    raw_command,
+                    fresh=command_fresh,
+                    last_height=height_cmd,
+                    fwd_max=fwd_max_eff,
+                    lat_max=lat_max_eff,
+                    yaw_max=yaw_max_eff,
+                    min_height=float(args.min_height),
+                    max_height=float(args.max_height),
+                )
+            else:
+                cmd = read_external_command(
+                    cmd_file=args.cmd_file,
+                    last_height=height_cmd,
+                    stale_s=float(args.cmd_stale_s),
+                    fwd_max=fwd_max_eff,
+                    lat_max=lat_max_eff,
+                    yaw_max=yaw_max_eff,
+                    min_height=float(args.min_height),
+                    max_height=float(args.max_height),
+                )
             h_overlay_active = (
                 arm_observation_compensation_enabled
                 and arm_overlay_monitor.active()
@@ -916,7 +1127,7 @@ def main() -> None:
                     last_stance,
                 )
                 now_status = time.monotonic()
-                if tap_event is not None or now_status - last_taptap_status_write >= 0.10:
+                if tap_event is not None or now_status - last_taptap_status_write >= 0.50:
                     write_taptap_status(
                         args.taptap_status_file,
                         adaptive_taptap,
@@ -967,9 +1178,34 @@ def main() -> None:
             lean_state = approach(lean_state, lean_target,
                                   float(args.back_lean_rate) * dt)
 
+            if cmd.estop or cmd.fsm in ("DAMP", "LIMP"):
+                publish_runtime_safety_frame(
+                    command=cmd,
+                    publisher=publisher,
+                    env=env,
+                    damping_kd=args.damping_kd,
+                    dry_run=args.dry_run,
+                )
+                elapsed = time.monotonic() - t0
+                if health_reporter is not None:
+                    health_reporter.record(
+                        cycle_started_at=t0,
+                        compute_s=elapsed,
+                        success=True,
+                    )
+                time.sleep(max(0.0, dt - elapsed))
+                continue
+
             try:
                 obs = env.observe()
             except Exception as exc:
+                elapsed = time.monotonic() - t0
+                if health_reporter is not None:
+                    health_reporter.record(
+                        cycle_started_at=t0,
+                        compute_s=elapsed,
+                        success=False,
+                    )
                 now = time.monotonic()
                 if now - last_print >= float(args.print_every_s):
                     print(f"[WAIT] no valid GR00T-WBC observation yet: {exc}")
@@ -1097,19 +1333,46 @@ def main() -> None:
                 last_print = now
 
             elapsed = time.monotonic() - t0
+            if health_reporter is not None:
+                health_reporter.record(
+                    cycle_started_at=t0,
+                    compute_s=elapsed,
+                    success=True,
+                )
             time.sleep(max(0.0, dt - elapsed))
     except KeyboardInterrupt:
+        stop_reason = "adapter_interrupted"
         print(f"\nStopping GR00T-WBC adapter; shutdown_action={args.shutdown_action}...")
-        if not args.dry_run and args.shutdown_action != "none":
-            for _ in range(max(1, int(float(args.shutdown_s) * args.hz))):
-                if args.shutdown_action == "limp":
-                    publisher.publish_limp()
-                elif args.shutdown_action == "damp":
-                    low_state = _latest_low_state(env)
-                    if low_state is not None:
-                        publisher.publish_damping(low_state, args.damping_kd)
-                time.sleep(dt)
+        emergency_shutdown()
+    except Exception as exc:
+        stop_reason = "adapter_exception"
+        print(
+            f"\n[FATAL] GR00T-WBC adapter main loop failed "
+            f"({type(exc).__name__}: {exc}); "
+            f"shutdown_action={args.shutdown_action}..."
+        )
+        emergency_shutdown()
+        raise
     finally:
+        shutdown_guard["done"] = True
+        atexit.unregister(emergency_shutdown)
+        for signum, previous in previous_signal_handlers.items():
+            signal.signal(signum, previous)
+        if command_receiver is not None:
+            try:
+                command_receiver.close()
+            except Exception as exc:
+                print(f"[WARN] cannot close command receiver: {exc}")
+        if health_reporter is not None:
+            try:
+                health_reporter.mark_stopped(reason=stop_reason)
+            except Exception as exc:
+                print(f"[WARN] cannot mark adapter health stopped: {exc}")
+        if pose_log is not None:
+            try:
+                pose_log.close()
+            except Exception as exc:
+                print(f"[WARN] cannot close pose log: {exc}")
         try:
             write_taptap_status(
                 args.taptap_status_file,
@@ -1122,8 +1385,8 @@ def main() -> None:
             print(f"[WARN] 无法清理 taptap 状态文件: {exc}")
         try:
             env.close()
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[WARN] cannot close GR00T environment: {exc}")
 
 
 if __name__ == "__main__":

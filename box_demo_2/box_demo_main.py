@@ -16,7 +16,6 @@ box_demo_2 主入口 — 货架前搜索 + 抓取
 import ssl  # noqa: E402,F401  (must precede cv2 / unitree_sdk2py)
 import argparse
 import csv
-import ctypes
 import math
 import os
 import sys
@@ -67,14 +66,14 @@ def _flush_stdin():
     finally:
         fcntl.fcntl(fd, fcntl.F_SETFL, fl)
 
-# 须先于 unitree_sdk2py / cyclonedds：避免 LD_LIBRARY_PATH 先加载错误 libddsc（与 RoboJuDo run_pipeline 一致）
-_ddsc = Path(os.environ.get("CYCLONEDDS_HOME", Path.home() / "cyclonedds-0.10-install")) / "lib" / "libddsc.so.0"
-if _ddsc.is_file():
-    ctypes.CDLL(str(_ddsc), mode=ctypes.RTLD_GLOBAL)
-
 from capture_and_predict import CameraSession, predict_from_arrays
 from vision_session_log import VisionSessionLog
-from dual_arm_target_reach import DualArmController, ARM_JOINTS, ArmKinematics
+from dual_arm_target_reach import (
+    ARM_JOINTS,
+    ArmKinematics,
+    DualArmController,
+    _legacy_sdk,
+)
 from arm_natural_hang import (
     ArmNaturalHangKeeper,
     make_handoff_callback,
@@ -91,10 +90,11 @@ try:
     from remote_mover import RemoteMover  # GR00T-WBC base over HTTP (box_demo on robot)
 except Exception as _remote_import_err:  # pragma: no cover
     RemoteMover = None
-
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher, ChannelSubscriber
-from unitree_sdk2py.idl.default import unitree_hg_msg_dds__LowCmd_
-from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_, LowState_
+try:
+    from arm_runtime_ipc import ArmRuntimeClient, ArmRuntimeError
+except Exception as _arm_runtime_import_err:  # pragma: no cover
+    ArmRuntimeClient = None
+    ArmRuntimeError = RuntimeError
 
 GOAL_CSV_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "goal.csv")
 
@@ -199,8 +199,13 @@ class WaistRotator:
     SETTLE_TOLERANCE = 0.02
     SETTLE_TIMEOUT = 1.0
 
-    def __init__(self, arm_keeper: ArmNaturalHangKeeper | None = None):
+    def __init__(
+        self,
+        arm_keeper: ArmNaturalHangKeeper | None = None,
+        arm_runtime=None,
+    ):
         self._keeper = arm_keeper
+        self._arm_runtime = arm_runtime
         self._pub = None
         self._sub = None
         self._low_state = None
@@ -215,13 +220,24 @@ class WaistRotator:
         if self._keeper is not None:
             self._keeper.sync_waist_from_robot()
             self.yaw = self._keeper._waist_yaw
-            print("  腰部旋转器已就绪（双臂自然下垂 + rt/arm_sdk）")
+            transport = "merger arm runtime" if self._arm_runtime is not None else "rt/arm_sdk"
+            print(f"  腰部旋转器已就绪（双臂自然下垂 + {transport}）")
+            return
+        if self._arm_runtime is not None and self._ready.is_set():
             return
         if self._pub is not None:
             return
-        self._pub = ChannelPublisher("rt/arm_sdk", LowCmd_)
+        if self._arm_runtime is not None:
+            state = self._arm_runtime.wait_state(timeout_s=2.0, max_age_s=0.10)
+            self._arm_q = list(state.q)
+            self.yaw = float(state.q[14])
+            self._ready.set()
+            print("  腰部旋转器已就绪（merger arm runtime，无 DDS）")
+            return
+        sdk = _legacy_sdk()
+        self._pub = sdk.ChannelPublisher("rt/arm_sdk", sdk.LowCmd)
         self._pub.Init()
-        self._sub = ChannelSubscriber("rt/lowstate", LowState_)
+        self._sub = sdk.ChannelSubscriber("rt/lowstate", sdk.LowState)
         self._sub.Init(self._on_state, 10)
         self._ready.wait(timeout=1.0)
         print("  腰部旋转器已就绪 (RL_LOWER + rt/arm_sdk)")
@@ -283,6 +299,10 @@ class WaistRotator:
             return
         self.initialize()
         time.sleep(0.1)
+        if self._arm_runtime is not None:
+            state = self._arm_runtime.latest_state(max_age_s=0.10)
+            self.yaw = 0.0 if state is None else float(state.q[14])
+            return
         if self._low_state is not None:
             self.yaw = float(self._low_state.motor_state[12].q)
         else:
@@ -301,6 +321,12 @@ class WaistRotator:
         """Wait until actual waist yaw converges to target within tolerance."""
         t0 = time.time()
         while time.time() - t0 < self.SETTLE_TIMEOUT:
+            if self._arm_runtime is not None:
+                state = self._arm_runtime.latest_state(max_age_s=0.10)
+                if state is not None and abs(float(state.q[14]) - target_yaw) < self.SETTLE_TOLERANCE:
+                    return
+                time.sleep(0.02)
+                continue
             if self._low_state is not None:
                 actual = float(self._low_state.motor_state[12].q)
                 if abs(actual - target_yaw) < self.SETTLE_TOLERANCE:
@@ -318,9 +344,21 @@ class WaistRotator:
 
     def _publish_once(self, target_yaw: float):
         """Publish one arm_sdk frame: waist at target, arms hold position."""
+        if self._arm_runtime is not None:
+            if self._arm_q is None:
+                return
+            q = list(self._arm_q)
+            q[14:17] = [float(target_yaw), 0.0, 0.0]
+            self._arm_runtime.publish(
+                q,
+                weight=1.0,
+                profile="waist_legacy_v1",
+            )
+            self._arm_q = q
+            return
         if self._pub is None or self._arm_q is None:
             return
-        cmd = unitree_hg_msg_dds__LowCmd_()
+        cmd = _legacy_sdk().new_low_cmd()
         if self._low_state is not None:
             cmd.mode_machine = self._low_state.mode_machine
             cmd.mode_pr = self._low_state.mode_pr
@@ -342,6 +380,10 @@ class WaistRotator:
     def _start_hold(self, target_yaw: float):
         """Start or update background keepalive thread."""
         self._hold_target = target_yaw
+        if self._arm_runtime is not None:
+            self._hold = True
+            self._publish_once(target_yaw)
+            return
         if self._thread is not None and self._thread.is_alive():
             # thread already running: just update target, no gap
             return
@@ -369,7 +411,19 @@ def main():
     parser.add_argument("--host",       default="192.168.112.198", help="SAM3 服务端 IP")
     parser.add_argument("--port",       default=5300, type=int,    help="SAM3 服务端端口")
     parser.add_argument("--iface",      default=None,              help="DDS 网络接口，如 eth0")
+    parser.add_argument(
+        "--arm-runtime-socket",
+        default=os.environ.get("GROOT_ARM_RUNTIME_SOCKET", ""),
+        help="merger 手臂运行时 Unix socket；设置后本进程不初始化 DDS",
+    )
+    parser.add_argument(
+        "--legacy-arm-dds",
+        action="store_true",
+        help="显式回退到原 rt/arm_sdk + rt/lowstate 路径（用于 A/B）",
+    )
     parser.add_argument("--no-confirm", action="store_true",       help="跳过执行前确认提示")
+    parser.add_argument("--single-run", action="store_true",
+                        help="完成一轮抓取或用尽尝试后清理并退出，不等待下一轮输入")
     parser.add_argument("--locomotion", choices=("agile", "groot", "remote"), default="agile",
                         help="运控底座: agile=AGILE pipeline(rt/lowcmd_rl 归一化), "
                              "groot=GR00T-WBC adapter 本机文件 IPC(units=agile 物理 m/s), "
@@ -414,6 +468,11 @@ def main():
                         help="RealSense 序列号")
     parser.add_argument("--no-grip-check", action="store_true",
                         help="关闭阶段3/4/5结束后的箱子夹持检测与自动重抓")
+    parser.add_argument(
+        "--grip-log-plot",
+        action="store_true",
+        help="额外生成夹持指标 PNG（会加载 Matplotlib；重构运行时默认关闭）",
+    )
     parser.add_argument("--vision-log-dir", default=None,
                         help="视觉记录根目录，默认 img/runs")
     parser.add_argument("--no-vision-log", action="store_true",
@@ -425,8 +484,32 @@ def main():
     print(f"  SAM3 点云阶段: {args.point_cloud_stage}")
     print("=" * 65)
 
-    arm_keeper = None if args.skip_arm_init else ArmNaturalHangKeeper()
-    waist = WaistRotator(arm_keeper)
+    arm_runtime = None
+    arm_runtime_socket = "" if args.legacy_arm_dds else args.arm_runtime_socket
+    if arm_runtime_socket:
+        if ArmRuntimeClient is None:
+            parser.error(f"arm runtime client 导入失败: {_arm_runtime_import_err}")
+        arm_runtime = ArmRuntimeClient(
+            arm_runtime_socket,
+            source=os.environ.get(
+                "GROOT_ARM_RUNTIME_SOURCE",
+                "manipulation.box_demo",
+            ),
+        )
+        try:
+            arm_runtime.connect()
+            arm_runtime.wait_state(timeout_s=2.0, max_age_s=0.10)
+        except ArmRuntimeError as exc:
+            arm_runtime.close(release=False)
+            parser.error(f"arm runtime 不可用: {exc.code}: {exc}")
+        print(f"[arm_runtime] merger IPC -> {arm_runtime_socket}（本进程不创建 DDS participant）")
+
+    arm_keeper = (
+        None
+        if args.skip_arm_init
+        else ArmNaturalHangKeeper(arm_runtime=arm_runtime)
+    )
+    waist = WaistRotator(arm_keeper, arm_runtime=arm_runtime)
 
     shutdown_done = False
     active_controller: DualArmController | None = None
@@ -441,10 +524,16 @@ def main():
         else:
             print("\n[退出] 平滑交还 policy...")
         if controller is not None:
-            controller.abort()
+            try:
+                controller.abort()
+            except Exception as exc:
+                print(f"  警告: controller.abort 失败: {exc}")
         q_start = None
         if arm_keeper is not None:
-            q_start = read_arm_q_from_state(arm_keeper)
+            try:
+                q_start = read_arm_q_from_state(arm_keeper)
+            except Exception as exc:
+                print(f"  警告: 无法读取退出姿态: {exc}")
         try:
             mover.stop()
         except Exception:
@@ -457,13 +546,33 @@ def main():
             print(f"  警告: mover.initialize 失败: {exc}")
         if arm_keeper is None:
             waist._arm_q = None
+            if arm_runtime is not None and arm_runtime.token is not None:
+                try:
+                    state = arm_runtime.wait_state(timeout_s=2.0, max_age_s=0.10)
+                    arm_runtime.publish(state.q, weight=1.0, profile="manip_v1")
+                    arm_runtime.release_to_policy(duration_s=2.5)
+                except Exception as exc:
+                    code = getattr(exc, "code", type(exc).__name__)
+                    print(
+                        f"  严重警告: arm runtime 交权失败，保持 lease 等待服务端安全回退: "
+                        f"{code}: {exc}"
+                    )
         else:
-            arm_keeper.release_to_policy(q_start=q_start)
+            try:
+                arm_keeper.release_to_policy(q_start=q_start)
+            except Exception as exc:
+                code = getattr(exc, "code", type(exc).__name__)
+                print(
+                    f"  严重警告: arm runtime 交权失败，保持当前姿态: "
+                    f"{code}: {exc}"
+                )
         print("box_demo 结束。")
 
     # ── 辅助函数 ────────────────────────────────────────────────
     def _walk(dist_x: float, dist_y: float):
         """控制机器人移动（前后 + 横向，转向交给腰部）。"""
+        if arm_keeper is not None:
+            arm_keeper.raise_if_failed()
         if abs(dist_x) < 0.03 and abs(dist_y) < 0.03:
             return
         waist.stop_hold()  # 行走前锁腰；自然下垂 keeper 保持运行
@@ -497,6 +606,8 @@ def main():
     IK_UNSOLVABLE_LIMIT = DualArmController.IK_ERR_LIMIT  # 100mm 算不出来
 
     def _hang_here(reason: str) -> None:
+        if args.single_run or args.no_confirm:
+            raise RuntimeError(reason)
         print(f"\n[暂停] {reason}")
         print("  进程停在此步（不退出）。按 Ctrl+C 可中断。")
         try:
@@ -598,11 +709,15 @@ def main():
 
     # ── DDS 初始化 ──────────────────────────
     print("\n[感知] SAM3 检测")
-    print("  初始化 DDS 通信 (用于 RL Pipeline 行走控制)...")
-    if args.iface:
-        ChannelFactoryInitialize(0, args.iface)
+    if arm_runtime is not None:
+        print("  手臂状态/命令由 merger IPC 提供；跳过 box_demo DDS 初始化。")
     else:
-        ChannelFactoryInitialize(0)
+        print("  初始化 legacy DDS 通信 (rt/arm_sdk + rt/lowstate)...")
+        sdk = _legacy_sdk()
+        if args.iface:
+            sdk.ChannelFactoryInitialize(0, args.iface)
+        else:
+            sdk.ChannelFactoryInitialize(0)
     # 小步前进旋钮(只对 groot/remote 底座生效)。见 FORWARD_STEP_TUNING.md
     _mover_kw = dict(min_duration=args.min_duration, min_distance=args.min_distance,
                      warmup_time=args.warmup_time, warmup_speed=args.warmup_speed,
@@ -644,8 +759,9 @@ def main():
             try:
                 print("\n[初始化] 等待机器人状态...")
                 arm_keeper.move_and_start()
-                _flush_stdin()
-                input("双臂已进入自然下垂，按 Enter 继续...\n")
+                if not args.no_confirm:
+                    _flush_stdin()
+                    input("双臂已进入自然下垂，按 Enter 继续...\n")
             except KeyboardInterrupt:
                 _graceful_shutdown(interrupted=True)
                 raise SystemExit(0)
@@ -673,10 +789,14 @@ def main():
 
         def _sam3_predict(stage: str, color, depth, extra=None):
             """SAM3 预测并写入 vision_log。返回 (result, meta)。"""
+            if arm_keeper is not None:
+                arm_keeper.raise_if_failed()
             result, meta = predict_from_arrays(
                 color, depth, args.prompt, args.host, args.port,
                 args.point_cloud_stage, return_meta=True,
             )
+            if arm_keeper is not None:
+                arm_keeper.raise_if_failed()
             vision_log.record(stage, color, depth, sam3=meta, extra=extra)
             return result, meta
 
@@ -902,6 +1022,8 @@ def main():
                             enable_grip_check=not args.no_grip_check,
                             grip_log_dir=grip_log_dir,
                             grip_log_tag=f"attempt_{attempt:02d}",
+                            grip_log_plot=args.grip_log_plot,
+                            arm_runtime=arm_runtime,
                         )
                     except ValueError as e:
                         ik_elapsed = time.time() - ik_start
@@ -981,12 +1103,15 @@ def main():
                         handoff_external_hold=_handoff_cb,
                         regrasp_callback=_regrasp_capture_point_a,
                     )
+                    active_controller = None
                     if arm_keeper is not None:
                         arm_keeper.ensure_keepalive()
 
                     grasp_succeeded = True
                     break
 
+                if args.single_run:
+                    break
                 if arm_keeper is not None:
                     _restart_grasp_round(grasp_succeeded)
                     continue
@@ -1003,16 +1128,16 @@ def main():
             raise SystemExit(0)
         except Exception as exc:
             print(f"\n[错误] {type(exc).__name__}: {exc}")
-            if arm_keeper is not None and arm_keeper.is_running():
-                _graceful_shutdown(controller=active_controller)
+            _graceful_shutdown(controller=active_controller)
             raise
 
         # ── 抓取结束 ──────────────────────────────────────────
         if not shutdown_done:
             if arm_keeper is not None:
                 print("\n抓取结束。双臂保持自然下垂。")
-                _flush_stdin()
-                input("按 Enter 解除自然下垂，交还给 policy 并退出...\n")
+                if not args.no_confirm:
+                    _flush_stdin()
+                    input("按 Enter 解除自然下垂，交还给 policy 并退出...\n")
                 _graceful_shutdown()
             else:
                 print("\n抓取结束。")
@@ -1021,6 +1146,8 @@ def main():
                 mover.release()
     finally:
         camera.__exit__(None, None, None)
+        if arm_runtime is not None:
+            arm_runtime.close(release=True)
 
 
 if __name__ == "__main__":

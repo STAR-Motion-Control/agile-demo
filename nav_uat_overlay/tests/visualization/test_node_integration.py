@@ -50,7 +50,16 @@ class FakeContinuousMotionBackend:
     def supports_continuous_velocity(self):
         return True
 
-    def publish_velocity(self, forward, lateral=0.0, yaw=0.0):
+    def publish_velocity(
+        self,
+        forward,
+        lateral=0.0,
+        yaw=0.0,
+        *,
+        cancel_event=None,
+    ):
+        if cancel_event is not None and cancel_event.is_set():
+            return False, "cancelled.", -2
         self.commands.append(
             {
                 "forward": float(forward),

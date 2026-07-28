@@ -85,6 +85,22 @@ def test_stale_recovery_status_is_never_active():
     assert status["active"] is False
 
 
+def test_stale_motion_command_holds_current_height():
+    path = Path(tempfile.mkdtemp()) / "cmd.json"
+    path.write_text(json.dumps({
+        "timestamp": time.time() - 2.0,
+        "fsm": "RL_FULL",
+        "height": 0.30,
+        "velocity": {"forward": 0.2, "lateral": 0.0, "yaw": 0.0},
+    }))
+
+    cmd = read_external_command(path, 0.76, 0.4, 0.5, 0.3, 0.6, 0.4, 0.8)
+
+    assert cmd.fresh is False
+    assert cmd.vx == cmd.vy == cmd.wz == 0.0
+    assert cmd.height == 0.76
+
+
 def test_deferred_motion_timeout_preserves_segment_without_recovery():
     path = Path(tempfile.mkdtemp()) / "cmd.json"
     setup_server(path)

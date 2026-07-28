@@ -9,7 +9,7 @@ hydra:
 
 host: 0.0.0.0
 port: 5000
-map_path: map/sustech_demon
+map_path: map/sustech_demo
 
 runtime:
   executor_threads: 2
@@ -64,14 +64,15 @@ motion_backend:
   # G001 onboard deployment: nav_uat and GR00T-WBC lower-body bridge run on
   # the robot itself. 5080 is no longer in the control path.
   # Roll back by setting this to wireless_controller.
-  type: groot_http_discrete
-  ipc_url: http://127.0.0.1:5001
-  box_demo_module_path: /home/unitree/zihou/box_demo_1
-  # Runtime override written by box_demo_1/start_g1_onboard_nav.sh.
+  type: groot_motion_bus
+  motion_bus_socket: /tmp/groot_motion_bus.sock
+  runtime_module_path: ${oc.env:GROOT_REFACTOR_ROOT,/home/unitree/zihou/agile-demo-refactor}
+  box_demo_module_path: ${motion_backend.runtime_module_path}/box_demo_groot
+  # Runtime override written by start_g1_onboard_runtime.sh.
   # precise: keep min_duration/min_distance; keyboard: use keyboard cruise speeds.
   motion_profile: precise
   profile_file: /tmp/groot_nav_motion_profile.json
-  initialize_before_motion: true
+  initialize_before_motion: false
   http_timeout: 2.0
   stand_height: 0.74
   fwd_cruise: 0.40
