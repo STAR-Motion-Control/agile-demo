@@ -1,12 +1,14 @@
 # G1-001 新版运行时测试指引
 
+首次联调请优先使用 [快速测试手册](G1_REFACTOR_QUICK_TEST.md)；本手册保留完整验收、诊断和回滚细节。
+
 本文用于测试独立部署在以下目录的新版代码：
 
 ```text
 /home/unitree/releases/agile-demo-refactor
 ```
 
-新版部署标签为 `g001-runtime-refactor-v1`。目录名不使用 Git 提交哈希；Git 提交号仅作为内部完整性记录。
+新版部署标签为 `g001-runtime-refactor-v1.1`。目录名不使用 Git 提交哈希；Git 提交号仅作为内部完整性记录。
 
 本文中的控制启动、停止、运动、导航和操控命令都只能由现场人员在机器人旁、完成安全检查并对当次操作明确授权后执行。代码同步、Git 校验和只读状态检查不代表已经获得控制授权。
 
@@ -63,7 +65,7 @@ git log -1 --oneline
 
 - `pwd` 为 `/home/unitree/releases/agile-demo-refactor`。
 - 当前分支为 `runtime-refactor-v1`。
-- 当前标签为 `g001-runtime-refactor-v1`。
+- 当前标签为 `g001-runtime-refactor-v1.1`。
 - `git status --short` 没有源码修改。ONNX 模型受 `.gitignore` 管理，不应形成源码 dirty 状态。
 
 确认新目录不是旧目录的软链接：
@@ -664,7 +666,7 @@ bash start_g1_onboard_nav.sh \
 
 ```text
 日期/操作员：
-部署标签：g001-runtime-refactor-v1
+部署标签：g001-runtime-refactor-v1.1
 新目录：/home/unitree/releases/agile-demo-refactor
 测试阶段：S0 / S1 / S2 / S3 / S4
 电池/功率模式/温度：
