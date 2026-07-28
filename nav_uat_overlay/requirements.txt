@@ -1,0 +1,16 @@
+requests 
+numpy<2.0 
+scipy 
+pyyaml 
+opencv-python-headless 
+openai 
+flask 
+hydra-core
+pillow
+fastapi
+uvicorn
+websockets
+pathfinding
+pyastar2d
+pyrealsense2
+matplotlib

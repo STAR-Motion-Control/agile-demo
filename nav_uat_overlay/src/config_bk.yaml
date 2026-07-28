@@ -1,0 +1,183 @@
+defaults:
+  - override hydra/job_logging: none
+  - override hydra/hydra_logging: none
+
+hydra:
+  run:
+    dir: .
+  output_subdir: null
+
+host: 0.0.0.0
+port: 5000
+map_path: map/sustech_demo
+
+rgbd_server:
+  launch_rgbd_server: true
+  publish_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
+  visualization: false
+  subscrib_topic:
+    rgb: /externel_front_image
+    depth: /externel_front_depth
+
+goal_recognition:
+  enable_embedding: true
+  embedding:
+    reset_endpoint: http://172.18.35.200:5210/reset_document
+    query_endpoint: http://172.18.35.200:5210/query_similarity
+
+  llm:
+    use_api: true
+    api_key: sk-44b0d1e4e33348b4a2ad59c638767635
+    api_endpoint: https://dashscope.aliyuncs.com/compatible-mode/v1
+    local_endpoint: http://172.18.35.200:8000/uploads/llm_queries
+
+localization:
+  enable_vpr: true
+  position_update_interval: 0.05
+  position_topic: /global_position
+  vpr:
+    time_interval: 6
+    endpoint: http://172.18.35.200:6001/localize_by_light
+    timeout: 5.0
+    robot_id: g1_1
+  near_goal_vpr_freeze:
+    enable: true
+    distance: 0.5
+
+lidar_safety:
+  enable: true
+  state_topic: /safety/lidar_state
+
+motion_backend:
+  # G001 onboard deployment: nav_uat and GR00T-WBC lower-body bridge run on
+  # the robot itself. 5080 is no longer in the control path.
+  # Roll back by setting this to wireless_controller.
+  type: groot_http_discrete
+  ipc_url: http://127.0.0.1:5001
+  box_demo_module_path: /home/unitree/zihou/box_demo_1
+  motion_profile: precise
+  profile_file: /tmp/groot_nav_motion_profile.json
+  initialize_before_motion: true
+  http_timeout: 2.0
+  stand_height: 0.74
+  fwd_cruise: 0.40
+  back_cruise: 0.20
+  lat_cruise: 0.20
+  yaw_cruise: 0.40
+  fwd_max: 0.50
+  back_max: 0.20
+  lat_max: 0.40
+  yaw_max: 0.60
+  min_duration: 1.0
+  min_distance: 0.08
+  v_floor: 0.10
+  w_floor: 0.10
+  warmup_time: 0.6
+  warmup_speed: 0.15
+  settle_before_s: 0.0
+  stop_hold_s: 0.4
+  walk_min_height: 0.72
+  auto_raise_for_walk: false
+  dist_gain: 1.0
+  verbose: true
+
+motion_control:
+  closed_loop:
+    enable: true
+    pose_timeout: 0.5
+    position_tolerance: 0.08
+    angle_tolerance: 0.07
+    final_position_tolerance: 0.12
+    final_angle_tolerance: 0.2
+    final_pose_timeout: 4.0
+    final_pose_max_forward_speed: 0.18
+    final_pose_max_lateral_command: 0.70
+    final_pose_max_angular_speed: 0.35
+    final_pose_min_linear_command: 0.03
+    final_pose_min_angular_command: 0.04
+    max_forward_speed: 1.0
+    max_lateral_command: 0.95
+    max_angular_speed: 1.0
+    min_linear_command: 0.08
+    min_angular_command: 0.12
+    forward_command_scale: 1.0
+    backward_command_scale: 1.0
+    left_command_scale: 2.0
+    right_command_scale: 2.0
+    positive_angular_command_scale: 2
+    negative_angular_command_scale: 2
+    angular_stop_prediction_time: 0.8
+    angular_stop_velocity_tolerance: 0.03
+    angular_stop_stable_time: 0.25
+    angular_velocity_filter_alpha: 0.35
+    linear_stop_prediction_time: 1.05
+    linear_stop_velocity_tolerance: 0.03
+    linear_stop_stable_time: 0.25
+    linear_velocity_filter_alpha: 0.35
+    forward_timeout_per_meter: 4.0
+    rotate_timeout_per_rad: 6.0
+    min_timeout: 1.0
+    stop_command_repeat: 8
+    stop_command_interval: 0.02
+    final_settle_time: 0.25
+    final_validation_samples: 3
+    final_validation_interval: 0.05
+    final_discrete_alignment_enable: true
+    final_discrete_alignment_passes: 2
+    final_discrete_alignment_min_translation: 0.02
+    final_discrete_alignment_min_angle: 0.03
+    final_discrete_alignment_settle_time: 0.2
+    final_pose_jump_filter_enable: true
+    final_pose_max_position_jump: 0.15
+    final_pose_max_angle_jump: 0.35
+    forward_timeout_acceptance_tolerance: 0.12
+    forward_timeout_acceptance_heading_tolerance: 0.1
+
+local_planner:
+  enbale_model_planner: false
+  model_planner:
+    reset_endpoint: http://172.18.35.200:5209/reset
+    action_endpoint: http://172.18.35.200:5209/get_action
+    reset_timeout: 3.0
+    action_timeout: 2.0
+    interval: 60
+    max_action_allowed: 4
+    use_discrete_action: true
+    camera_intrinsics:
+      - [387.00686646, 0.0, 319.60223389]
+      - [0.0, 386.47955322, 242.79476929]
+      - [0.0, 0.0, 1.0]
+
+  line_segment_planner:
+    max_path_threshold: 20
+    interval: 10
+    near_goal_yaw_only_distance: 0.12
+    near_goal_alignment_distance: 1.0
+
+only_global_planner_area:
+  enable_only_global_planner_area: true
+  polygons:
+    - - [8.2, 1]
+      - [10.2, 1]
+      - [10.2, -12]
+      - [8.2, -12]
+    - - [8.2, 4.8]
+      - [12.1, 4.8]
+      - [12.1, 1.1]
+      - [8.2, 1.1]
+
+visualization:
+  enable: true
+  host: 0.0.0.0
+  port: 8008
+  save_replay: true
+  max_event_buffer: 2000
+  max_replay_mb: 512
+  jpeg_quality: 70
+  rgb_preview_fps: 5.0
+  rgb_preview_width: 320
+  rgb_preview_height: 240
+  depth_preview_fps: 1.0
+  history_dir: ./log/viz_history

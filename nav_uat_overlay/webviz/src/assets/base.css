@@ -1,0 +1,36 @@
+:root {
+  color-scheme: dark;
+  font-family: "Noto Sans SC", "Segoe UI", sans-serif;
+  background: #0b1120;
+  color: #e5eefc;
+  scrollbar-color: rgba(147, 166, 201, 0.55) rgba(255, 255, 255, 0.05);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  background: linear-gradient(180deg, #0b1120 0%, #101a33 100%);
+}
+
+#app {
+  min-height: 100vh;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(147, 166, 201, 0.42);
+}
