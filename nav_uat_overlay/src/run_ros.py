@@ -4,7 +4,6 @@ import logging
 import math
 import os
 import socket
-import threading
 
 import cv2
 import hydra
@@ -21,9 +20,7 @@ from navigation import NavigationTaskService
 from utils.logger import ColorFormatter
 from utils.utils import reset_embedding_model
 from visualization.image_store import ImageStore
-from visualization.frame_pipeline import FramePipeline
 from visualization.map_utils import build_map_metadata
-from visualization.replay_store import ReplayStore
 from visualization.server import create_app, launch_server_in_thread
 from visualization.state_hub import VisualizationStateHub
 
@@ -82,40 +79,49 @@ def prepare_visualization(cfg, map_ctx):
     with open(map_config_path, "r", encoding="utf-8") as handle:
         map_cfg = yaml.safe_load(handle)
 
-    replay_store = ReplayStore(
-        history_dir=cfg.visualization.history_dir,
-        max_replay_mb=cfg.visualization.max_replay_mb,
-    )
+    save_replay = bool(config_get(cfg.visualization, "save_replay", False))
+    replay_store = None
+    if save_replay:
+        from visualization.replay_store import ReplayStore
+
+        replay_store = ReplayStore(
+            history_dir=cfg.visualization.history_dir,
+            max_replay_mb=cfg.visualization.max_replay_mb,
+        )
     state_hub = VisualizationStateHub(
         max_event_buffer=cfg.visualization.max_event_buffer,
         replay_store=replay_store,
-        save_replay=cfg.visualization.save_replay,
+        save_replay=save_replay,
     )
     image_store = ImageStore(
         jpeg_quality=cfg.visualization.jpeg_quality,
         rgb_preview_fps=cfg.visualization.rgb_preview_fps,
         depth_preview_fps=cfg.visualization.depth_preview_fps,
     )
-    frame_pipeline = FramePipeline(
-        image_store=image_store,
-        state_hub=state_hub,
-        stream_fps={
-            "rgb_latest": {
-                "fps": cfg.visualization.rgb_preview_fps,
-                "preview_size": [
-                    cfg.visualization.rgb_preview_width,
-                    cfg.visualization.rgb_preview_height,
-                ],
+    frame_pipeline = None
+    if bool(config_get(cfg.visualization, "enable_live_frames", False)):
+        from visualization.frame_pipeline import FramePipeline
+
+        frame_pipeline = FramePipeline(
+            image_store=image_store,
+            state_hub=state_hub,
+            stream_fps={
+                "rgb_latest": {
+                    "fps": cfg.visualization.rgb_preview_fps,
+                    "preview_size": [
+                        cfg.visualization.rgb_preview_width,
+                        cfg.visualization.rgb_preview_height,
+                    ],
+                },
+                "rgb_navdp": {
+                    "fps": cfg.visualization.rgb_preview_fps,
+                    "preview_size": [
+                        cfg.visualization.rgb_preview_width,
+                        cfg.visualization.rgb_preview_height,
+                    ],
+                }
             },
-            "rgb_navdp": {
-                "fps": cfg.visualization.rgb_preview_fps,
-                "preview_size": [
-                    cfg.visualization.rgb_preview_width,
-                    cfg.visualization.rgb_preview_height,
-                ],
-            }
-        },
-    )
+        )
     area_cfg = cfg.only_global_planner_area
     only_global_planner_area = config_get(
         area_cfg,
@@ -583,10 +589,12 @@ def main(cfg):
         except Exception:
             pass
         if visualization is not None:
-            try:
-                visualization["frame_pipeline"].stop(timeout=1.0)
-            except Exception:
-                pass
+            frame_pipeline = visualization.get("frame_pipeline")
+            if frame_pipeline is not None:
+                try:
+                    frame_pipeline.stop(timeout=1.0)
+                except Exception:
+                    pass
             try:
                 visualization["server"].should_exit = True
             except Exception:

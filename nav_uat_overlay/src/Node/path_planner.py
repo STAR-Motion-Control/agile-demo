@@ -1,23 +1,24 @@
-from pathfinding.core.grid import Grid
-from pathfinding.finder.a_star import AStarFinder
-import pyastar2d
-import os, cv2, math
-import numpy as np
-import matplotlib.pylab as plt
-import imageio, io
 import logging
+import math
+from pathlib import Path
 from threading import Lock
+
+import cv2
+import numpy as np
+import pyastar2d
 
 logger = logging.getLogger(__name__)
 
 class PathPlanner:
-    def __init__(self, img, origin, resolution):
+    def __init__(self, img, origin, resolution, record_debug=False, debug_dir="./img"):
         self.origin_img = img
         self.img = self.preprocess(img)
         self.current_position = None
         self.origin = origin
         self.resolution = resolution
-        self.path_imgs = [] # used to plot path
+        self.record_debug = bool(record_debug)
+        self.debug_dir = Path(debug_dir)
+        self.path_imgs = []
         self._lock = Lock()
         self.episode_id = 0
         
@@ -116,6 +117,14 @@ class PathPlanner:
         return smoothed
     
     def plot(self, path_pixel, interval=30, max_threshold=60):
+        if not self.record_debug:
+            return False
+
+        import io
+
+        import imageio.v2 as imageio
+        import matplotlib.pyplot as plt
+
         start_point = self.world_to_pixel(self.current_position[:-1])[0]
         end_point = self.world_to_pixel([self.current_position[0]+1*math.cos(self.current_position[-1]), self.current_position[1]+1*math.sin(self.current_position[-1])])[0]
         path_point_x = path_pixel[0]
@@ -137,9 +146,21 @@ class PathPlanner:
         
         img = imageio.imread(buf)
         self.path_imgs.append(img)
+        return True
 
     def save_fig(self,):
-        os.makedirs('./img',exist_ok=True)
-        imageio.mimsave(f"./img/{self.episode_id}.gif", self.path_imgs, duration=1.0)
+        if not self.record_debug or not self.path_imgs:
+            self.path_imgs = []
+            return False
+
+        import imageio.v2 as imageio
+
+        self.debug_dir.mkdir(parents=True, exist_ok=True)
+        imageio.mimsave(
+            self.debug_dir / f"{self.episode_id}.gif",
+            self.path_imgs,
+            duration=1.0,
+        )
         self.episode_id += 1
         self.path_imgs = []
+        return True

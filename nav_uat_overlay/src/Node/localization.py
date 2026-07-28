@@ -1,21 +1,19 @@
 #!/usr/bin/env python
-import rclpy
-from rclpy.node import Node
-from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path, Odometry
-from std_srvs.srv import Trigger
-import math, os
-from utils.utils import ModelServiceError, convert_image2pose
-from cv_bridge import CvBridge
-import cv2
-from threading import Lock
-from sensor_msgs.msg import Image
-import numpy as np
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
-from message_filters import Subscriber, ApproximateTimeSynchronizer
-from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 import logging
+import math
+from threading import Lock
+
+import numpy as np
+from frame_hub import CameraFrameHub
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+
+from runtime_config import diagnostics_enabled, resolve_frame_max_age
 from scipy.spatial.transform import Rotation as R
+from utils.utils import ModelServiceError, convert_image2pose
 
 logger = logging.getLogger(__name__)
 
@@ -23,21 +21,15 @@ class LocalizationClient(Node):
     CONTINUOUS_VPR_MODE = "continuous_vpr"
     VPR_ONCE_ODOM_MODE = "vpr_once_odom"
 
-    def __init__(self, cfg, visualization=None):
+    def __init__(self, cfg, visualization=None, frame_hub=None):
         super().__init__('localization_client')
         self.cfg = cfg
         self.visualization = visualization
-        self.bridge = CvBridge()
+        self.frame_hub = frame_hub or CameraFrameHub()
 
-        self.rgbd_group = MutuallyExclusiveCallbackGroup()
         self.odom_group = MutuallyExclusiveCallbackGroup()
         self.localization_group = MutuallyExclusiveCallbackGroup()
         self.position_group = MutuallyExclusiveCallbackGroup()
-
-        self.rgb_subscription = Subscriber(self, Image, cfg.rgbd_server.subscrib_topic.rgb, qos_profile=qos_profile_sensor_data, callback_group=self.rgbd_group)
-        self.depth_subscription = Subscriber(self, Image, cfg.rgbd_server.subscrib_topic.depth, qos_profile=qos_profile_sensor_data, callback_group=self.rgbd_group)
-        self.timesynchronizer = ApproximateTimeSynchronizer([self.rgb_subscription, self.depth_subscription], queue_size=10, slop=0.05)
-        self.timesynchronizer.registerCallback(self.rgbd_callback)
 
         qos_profile = QoSProfile(
         depth = 1, 
@@ -49,10 +41,6 @@ class LocalizationClient(Node):
         self.T_odom2map = None
         self.T_base2odom = None
 
-        self.rgb_frame = None
-        self.depth_frame = None
-        
-        self.rgbd_lock = Lock()
         self.odom_lock = Lock()
         self.transform_lock = Lock()
         self.navigation_goal_lock = Lock()
@@ -83,6 +71,16 @@ class LocalizationClient(Node):
         self.position_publisher = self.create_publisher(PoseStamped, self.cfg.localization.position_topic, qos_profile)
         self.vpr_timeout = float(
             self.config_get(self.config_get(self.cfg.localization, "vpr", {}), "timeout", 5.0)
+        )
+        self.vpr_frame_max_age = resolve_frame_max_age(
+            self.cfg.localization,
+            "vpr",
+            default=1.0,
+        )
+        self.save_vpr_images = diagnostics_enabled(
+            cfg,
+            "save_vpr_images",
+            default=False,
         )
 
         self.img_id = 0
@@ -217,25 +215,16 @@ class LocalizationClient(Node):
         except Exception as e:
             logger.error(f"Failed to process odom information: {str(e)}")
     
-    def rgbd_callback(self, rgb_msg, depth_msg):
-        try:
-            rgb_frame = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='bgr8')
-            depth_frame = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
-            # print("RGB shape:", rgb_frame.shape, "Depth shape:", depth_frame.shape)
-            with self.rgbd_lock:
-                self.rgb_frame = rgb_frame
-                self.depth_frame = depth_frame
-        except Exception as e:
-            logger.error(f"Failed to process rgb or depth frame: {str(e)}")
-    
     def localization_callback(self,):
-        rgb_frame = None
         logger.info(f"Localization service callback triggered, robot_id={self.cfg.localization.vpr.robot_id}")
-        with self.rgbd_lock:
-            if self.rgb_frame is None:
-                logger.error(f"Get rgb_frame None, skip localization")
-                return 
-            rgb_frame = self.rgb_frame
+        frame = self.frame_hub.latest(
+            require_depth=False,
+            max_age_s=self.vpr_frame_max_age,
+        )
+        if frame is None:
+            logger.error("No fresh RGB frame is available, skip localization")
+            return
+        rgb_frame = frame.rgb
         with self.odom_lock:
             if self.T_base2odom is None:
                 logger.error("T_base2odom not ready, skip localization")
@@ -303,8 +292,12 @@ class LocalizationClient(Node):
             self.T_odom2map = T_odom2map
         self._stop_vpr_after_initial_fix()
 
-        if self.cfg.rgbd_server.visualization:
-            os.makedirs(f'./img/localization_rgb',exist_ok=True)
+        if self.save_vpr_images:
+            import os
+
+            import cv2
+
+            os.makedirs('./img/localization_rgb',exist_ok=True)
             cv2.imwrite(f'./img/localization_rgb/{self.img_id}.jpg', rgb_frame)
             self.img_id += 1
     

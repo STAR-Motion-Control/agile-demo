@@ -19,6 +19,7 @@ from Node.action_executor import ActionExecutorClient  # noqa: E402
 from Node.action_planner import ActionPlanner  # noqa: E402
 from Node.localization import LocalizationClient  # noqa: E402
 from Node.rgbd import RGBDClient  # noqa: E402
+from frame_hub import CameraFrameHub  # noqa: E402
 from visualization.adapters import ExecutorVisualizationAdapter, PlannerVisualizationAdapter  # noqa: E402
 from visualization.state_hub import VisualizationStateHub  # noqa: E402
 
@@ -161,11 +162,12 @@ def test_localization_client_skips_vpr_transform_update_after_near_goal_freeze(m
     client = object.__new__(LocalizationClient)
     client.visualization = make_visualization_bundle()
     client.visualization["state_hub"].start_task_recording(task_id="task-1", goal_text="door")
-    client.rgbd_lock = threading.Lock()
+    client.frame_hub = CameraFrameHub()
+    client.frame_hub.publish(np.zeros((8, 8, 3), dtype=np.uint8), source="test")
+    client.vpr_frame_max_age = None
     client.odom_lock = threading.Lock()
     client.transform_lock = threading.Lock()
     client.navigation_goal_lock = threading.Lock()
-    client.rgb_frame = np.zeros((8, 8, 3), dtype=np.uint8)
     client.T_base2odom = np.eye(4)
     client.T_odom2map = np.eye(4)
     client.T_odom2map[0:2, 3] = [1.0, 2.0]
@@ -177,6 +179,7 @@ def test_localization_client_skips_vpr_transform_update_after_near_goal_freeze(m
     client.localization_mode = LocalizationClient.CONTINUOUS_VPR_MODE
     client.global_localization_timer = FakeTimer()
     client.img_id = 0
+    client.save_vpr_images = False
     client.cfg = SimpleNamespace(
         localization=SimpleNamespace(
             vpr=SimpleNamespace(
@@ -260,9 +263,14 @@ def test_action_planner_encodes_navdp_plan_metadata(monkeypatch):
     planner.navigation_lock = threading.Lock()
     planner._navigation_active = True
     planner.visualization = None
-    planner.rgbd_lock = threading.Lock()
-    planner.rgb_frame = np.zeros((8, 8, 3), dtype=np.uint8)
-    planner.depth_frame = np.zeros((8, 8), dtype=np.float32)
+    planner.frame_hub = CameraFrameHub()
+    planner.frame_hub.publish(
+        np.zeros((8, 8, 3), dtype=np.uint8),
+        np.zeros((8, 8), dtype=np.float32),
+        source="test",
+    )
+    planner.model_planner_enabled = True
+    planner.model_planner_frame_max_age = None
     planner.path_planner = SimpleNamespace(current_position=(1.0, 2.0, 0.3))
     planner.model_planner_timeout = 1.0
     planner.max_action_allowed = 2

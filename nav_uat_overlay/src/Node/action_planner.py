@@ -1,46 +1,49 @@
 #!/usr/bin/env python
-import rclpy
-from rclpy.node import Node
+import logging
+import math
+from threading import Lock
+
+import numpy as np
+from frame_hub import CameraFrameHub
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path
-from std_srvs.srv import Trigger
-import math, os
-from utils.utils import ModelServiceError, convert_image_depth2localaction
-from cv_bridge import CvBridge
-import cv2
-from threading import Lock
-from sensor_msgs.msg import Image
-import numpy as np
-from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy, qos_profile_sensor_data
-from message_filters import Subscriber, ApproximateTimeSynchronizer
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
-import logging
+from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+
+from runtime_config import (
+    diagnostics_enabled,
+    model_planner_enabled,
+    resolve_frame_max_age,
+)
 from scipy.spatial.transform import Rotation as R
-from .path_planner import PathPlanner
+from std_srvs.srv import Trigger
+from utils.utils import ModelServiceError, convert_image_depth2localaction
 from visualization.adapters import PlannerVisualizationAdapter
+
+from .path_planner import PathPlanner
 
 logger = logging.getLogger(__name__)
 
 NAVDP_ACTION_METADATA_MARKER = -1.0
 
 class ActionPlanner(Node):
-    def __init__(self, cfg, img, origin, resolution, visualization=None):
+    def __init__(self, cfg, img, origin, resolution, visualization=None, frame_hub=None):
         super().__init__('action_planner_client')
         self.cfg = cfg
         self.visualization = visualization
+        self.frame_hub = frame_hub or CameraFrameHub()
         self.viz = PlannerVisualizationAdapter(visualization=visualization)
-        self.path_planner = PathPlanner(img, origin, resolution)
+        self.path_planner = PathPlanner(
+            img,
+            origin,
+            resolution,
+            record_debug=diagnostics_enabled(cfg, "record_path_gif", default=False),
+        )
         self.action_pub = self.create_publisher(Path, '/planned_action', 1)
-        self.bridge = CvBridge()
 
-        self.rgbd_group = MutuallyExclusiveCallbackGroup()
         self.replanning_group = MutuallyExclusiveCallbackGroup()
         self.position_group = MutuallyExclusiveCallbackGroup()
-
-        self.rgb_subscription = Subscriber(self, Image, cfg.rgbd_server.subscrib_topic.rgb, qos_profile=qos_profile_sensor_data, callback_group=self.rgbd_group)
-        self.depth_subscription = Subscriber(self, Image, cfg.rgbd_server.subscrib_topic.depth, qos_profile=qos_profile_sensor_data, callback_group=self.rgbd_group)
-        self.timesynchronizer = ApproximateTimeSynchronizer([self.rgb_subscription, self.depth_subscription], queue_size=10, slop=0.05)
-        self.timesynchronizer.registerCallback(self.rgbd_callback)
 
         qos_profile = QoSProfile(
         depth = 1, 
@@ -50,11 +53,8 @@ class ActionPlanner(Node):
         )
         self.position_subscription = self.create_subscription(PoseStamped, self.cfg.localization.position_topic, self.position_callback, qos_profile, callback_group=self.position_group)
 
-        self.rgb_frame = None
-        self.depth_frame = None
         self.current_position = None
 
-        self.rgbd_lock = Lock()
         self.position_lock = Lock()
         self.navigation_lock = Lock()
         self._navigation_active = False
@@ -74,6 +74,12 @@ class ActionPlanner(Node):
         self.max_action_allowed = int(cfg.local_planner.model_planner.max_action_allowed)
         self.model_planner_timeout = float(
             self.config_get(cfg.local_planner.model_planner, "action_timeout", 8.0)
+        )
+        self.model_planner_enabled = model_planner_enabled(cfg)
+        self.model_planner_frame_max_age = resolve_frame_max_age(
+            cfg.local_planner,
+            "model_planner",
+            default=1.0,
         )
         self._navdp_plan_sequence = 0
         self.camera_intrinsics = self._normalize_camera_intrinsics(
@@ -125,18 +131,6 @@ class ActionPlanner(Node):
         except Exception as e:
             logger.error(f"Failed to process odom information: {str(e)}")
     
-    def rgbd_callback(self, rgb_msg, depth_msg):
-        try:
-            rgb_frame = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='bgr8')
-            depth_frame = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='32FC1')
-            # print("RGB shape:", rgb_frame.shape, "Depth shape:", depth_frame.shape)
-            with self.rgbd_lock:
-                self.rgb_frame = rgb_frame
-                self.depth_frame = depth_frame
-        except Exception as e:
-            logger.error(f"Failed to process rgb or depth frame: {str(e)}")
-    
-
     def replanning_trigger_call_back(self, request, response):
         logger.info("replanning_trigger callback triggered")
         if not self.is_navigation_active():
@@ -227,16 +221,21 @@ class ActionPlanner(Node):
         if not self.is_navigation_active():
             logger.info("Navigation inactive, skip local planner publish.")
             return None
-        rgb_frame = None
-        depth_frame = None
-        logger.info(f"Localplanner triggered!", extra={'color': 'BLUE'})
-        with self.rgbd_lock:
-            if self.rgb_frame is not None and self.depth_frame is not None:
-                rgb_frame = self.rgb_frame
-                depth_frame = self.depth_frame
-            else:
-                logger.error(f"Get rgb_frame None!")
-                return None
+        if not self.model_planner_enabled:
+            logger.info("Model planner disabled, skip NavDP request.")
+            return None
+        logger.info("Localplanner triggered!", extra={'color': 'BLUE'})
+        frame = self.frame_hub.latest(
+            require_depth=True,
+            max_age_s=self.model_planner_frame_max_age,
+        )
+        if frame is None:
+            logger.error("No fresh RGB-D frame is available, skip NavDP request")
+            return None
+        rgb_frame = frame.rgb
+        depth_frame = frame.depth
+        if frame.depth_scale != 1.0:
+            depth_frame = np.asarray(depth_frame, dtype=np.float32) * frame.depth_scale
         self._publish_navdp_input_frame(rgb_frame)
         
         x0, y0, theta0 = self.path_planner.current_position
@@ -269,7 +268,7 @@ class ActionPlanner(Node):
             )
             return None
         if not full_action_sequence:
-            logger.error(f"localplanner returned empty action sequence!")
+            logger.error("localplanner returned empty action sequence!")
             return None
         executed_action_sequence = full_action_sequence[:self.max_action_allowed]
         logger.info(

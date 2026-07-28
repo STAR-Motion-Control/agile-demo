@@ -1,17 +1,19 @@
-from .step_control import StepControlClient
-from .localization import LocalizationClient
-from .action_executor import ActionExecutorClient
-from .action_planner import ActionPlanner
-from .rgbd import RGBDClient
+import logging
+from threading import Thread
+
+import rclpy
+from frame_hub import CameraFrameHub
 from navigation import NavigationController
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.signals import SignalHandlerOptions
-import rclpy, math
-from threading import Thread
+from runtime_config import model_planner_enabled, resolve_executor_threads
 from utils.utils import reset_model_planner
-from typing import List
-import logging
 
+from .action_executor import ActionExecutorClient
+from .action_planner import ActionPlanner
+from .localization import LocalizationClient
+from .rgbd import RGBDClient
+from .step_control import StepControlClient
 
 logger = logging.getLogger(__name__)
 
@@ -22,13 +24,32 @@ class NodeManager:
         self.visualization = visualization
         self._shutdown = False
         rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
-        self.executor = MultiThreadedExecutor()
+        self.executor_threads = resolve_executor_threads(cfg)
+        self.executor = MultiThreadedExecutor(num_threads=self.executor_threads)
+        self.frame_hub = CameraFrameHub()
+        require_depth = model_planner_enabled(cfg)
         
         self.step_control_client = StepControlClient(cfg=cfg)
-        self.localization_client = LocalizationClient(cfg, visualization=visualization)
-        self.action_planner = ActionPlanner(cfg, img, origin, resolution, visualization=visualization)
+        self.localization_client = LocalizationClient(
+            cfg,
+            visualization=visualization,
+            frame_hub=self.frame_hub,
+        )
+        self.action_planner = ActionPlanner(
+            cfg,
+            img,
+            origin,
+            resolution,
+            visualization=visualization,
+            frame_hub=self.frame_hub,
+        )
         self.action_excutor = ActionExecutorClient(cfg=cfg, visualization=visualization)
-        self.rgbd_client = RGBDClient(cfg, visualization=visualization)
+        self.rgbd_client = RGBDClient(
+            cfg,
+            visualization=visualization,
+            frame_hub=self.frame_hub,
+            require_depth=require_depth,
+        )
         self.navigation_controller = NavigationController(
             cfg=cfg,
             action_planner=self.action_planner,
@@ -48,8 +69,17 @@ class NodeManager:
         for node in self._nodes:
             self.executor.add_node(node)
 
-        self.executor_thread = Thread(target=self.executor.spin, daemon=True)
+        self.executor_thread = Thread(
+            target=self.executor.spin,
+            name="nav_ros_executor",
+            daemon=True,
+        )
         self.executor_thread.start()
+        logger.info(
+            "Navigation nodes started with %d ROS executor threads (NavDP depth=%s)",
+            self.executor_threads,
+            require_depth,
+        )
         
 
     def forward(
@@ -104,7 +134,7 @@ class NodeManager:
 
     def navigation(
         self,
-        goal : List[float],
+        goal : list[float],
         dry_run: bool = False,
     ):
         '''
@@ -191,6 +221,13 @@ class NodeManager:
                 action_executor.shutdown(timeout_sec=timeout_sec)
             except Exception as exc:
                 logger.debug("Action executor shutdown failed: %s", exc)
+
+        rgbd_client = getattr(self, "rgbd_client", None)
+        if rgbd_client is not None and hasattr(rgbd_client, "shutdown"):
+            try:
+                rgbd_client.shutdown(timeout_sec=timeout_sec)
+            except Exception as exc:
+                logger.debug("RGBD client shutdown failed: %s", exc)
 
         executor = getattr(self, "executor", None)
         if executor is not None:

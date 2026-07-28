@@ -11,8 +11,20 @@ host: 0.0.0.0
 port: 5000
 map_path: map/sustech_demon
 
+runtime:
+  executor_threads: 2
+  diagnostics:
+    record_path_gif: false
+    save_vpr_images: false
+
 rgbd_server:
   launch_rgbd_server: true
+  publish_ros_topics: false
+  capture_depth: null
+  width: 640
+  height: 480
+  fps: 15
+  serial_number: "419222302306"
   publish_topic:
     rgb: /externel_front_image
     depth: /externel_front_depth
@@ -39,6 +51,7 @@ localization:
   position_topic: /global_position
   vpr:
     time_interval: 6
+    frame_max_age: 1.0
     endpoint: http://172.18.35.200:6004/localize_by_light
     timeout: 5.0
     robot_id: g1_1
@@ -129,6 +142,7 @@ local_planner:
     action_endpoint: http://172.18.35.200:5209/get_action
     reset_timeout: 3.0
     action_timeout: 2.0
+    frame_max_age: 1.0
     interval: 60
     max_action_allowed: 4
     use_discrete_action: true
@@ -156,9 +170,10 @@ only_global_planner_area:
 
 visualization:
   enable: true
+  enable_live_frames: false
   host: 0.0.0.0
   port: 8008
-  save_replay: true
+  save_replay: false
   max_event_buffer: 2000
   max_replay_mb: 512
   jpeg_quality: 70
