@@ -101,3 +101,48 @@ JSON 逐字节一致，SHA256 均为：
 下一阶段仍需要人在环明确授权，在同一台 Jetson、同一地图/路线、同一
 外设与温度条件下对比 CPU、run queue、控制周期 p95/p99/max、deadline miss
 和步态。
+
+## 2026-07-29 G1-001 旧版导航参数对齐回归
+
+验证提交：`206e05e`
+
+这次回归修正了上述旧报告的一个覆盖缺口。旧报告的 744 帧 A/B 使用了共享的固定 mover 参数，且没有执行真机保留 launcher 的 profile heredoc，因此不能证明 `config_g001` 的实际默认行为不变。该缺口曾经使新版回退到 `warmup_time=0.6` 和 `v_floor=0.10`，而真机旧版实际为 `0.0` 和 `0.12`。
+
+新版不修改 `config_g001.yaml`、`config_bk.yaml` 或导航速度算法。runtime 现在显式写入从旧真机 `start_g1_onboard_nav.sh` 提取的 14 个行为字段，导航使用 `config_g001` 时必须先通过 profile 强校验。新架构所需的 schema、source、motion-bus backend 和 socket 元数据仍保留。
+
+### 独立 profile 和命令 A/B
+
+旧侧从保留 launcher 的 Python heredoc 生成 profile，新侧从 runtime profile builder 生成另一份 profile；两侧分别与 `config_g001` 组合成有效 mover 参数，不再共享手写常量。结果：
+
+- 30 组运动求解和 22 组命令 trace 全部一致，共比较 721 个命令帧。
+- `config`、`config_bk`、`config_g001` 共 54 个速度键通过契约比较。
+- `0.10 m` 前进在旧、新两侧均为 `(0.12 m/s, 1.0 s, 0.12 m, precise)`，没有 warmup 帧。
+- 两份 profile 的 14 个行为字段逐项相等。
+
+独立验证目录中的导航/runtime 核心回归为 `165 passed in 2.67 s`；其中定向 profile 与 `config_g001` 测试为 `48 passed`。
+
+### MuJoCo 实际 profile A/B
+
+两份独立 JSON profile 分别传入生产 `GrootMover` 的 MuJoCo 路线测试。两次运行都产生 645 个控制 tick，没有摔倒，最低骨盆高度均为 `0.744301195007 m`。计划、有效参数、控制帧和位姿 JSON 逐字节一致，SHA-256 均为：
+
+```text
+24f6be53f99b193b4b81f7d4b3dd7dc26850b238fcb5810c3bf38302cdc7d125
+```
+
+与不允许执行的操控冷服务并行时，操控请求正确返回 `403 EXECUTION_DISABLED`，没有启动 `box_demo_main.py`；并行 MuJoCo 输出的 SHA-256 仍与单独运行一致。
+
+### 性能烟雾值
+
+在 5080 隔离环境和假 transport 下：
+
+- 旧侧 backend p95：`1.920 us`。
+- 新侧 backend p95：`1.617 us`。
+- motion-bus encode p95：`3.606 us`。
+- frame hub p95：`1.524 us`。
+- 100 点路径转换 p95：`24.717 us`。
+
+这些数据只用于检查重构没有引入明显的离线开销回归，不是 Jetson 收益数据。
+
+### 结论边界
+
+本轮可以证明新版导航 profile、`config_g001` 有效参数、运动规划、命令帧和 MuJoCo 路线与旧版一致。本轮仍未运行 G1 真机控制、真实 RealSense/定位/路径闭环，也未测量 Jetson CPU 或真机步态；因此不能声称真机“导航 + 操控 + 运控”负载问题已经解决。

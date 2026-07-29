@@ -2,25 +2,24 @@
 
 新版目录：`/home/unitree/releases/agile-demo-refactor`
 
-适用标签：`g001-runtime-refactor-v1.2`
+适用标签：`g001-runtime-refactor-v1.3`
 
-当前允许测试：运控 preflight、运控零速 health、右膝复查通过后的单次键盘小动作，以及冷操控 403。导航 profile 尚未与旧版对齐，因此禁止启动导航和发送导航命令。
+本标签已把导航 profile 同步为旧真机 launcher 的默认参数。5080 已验证旧、新 profile 的命令规划和 MuJoCo 路线一致；这不等于真机位移、Jetson CPU 或三模块联合负载已经通过。
 
 ## 0. 环境和安全
 
 ```text
-运控：由 launcher 自动激活 Conda，现场不手工激活或填写 CONDA_ENV。
-导航：使用 nav 环境，但当前标签禁止启动。
+运控：launcher 自动激活原 Conda，现场不手工激活或填写 CONDA_ENV。
+导航：使用 nav 环境。
 操控：使用 robojudo_zihou2 环境。
 ```
-
-运控 launcher 已默认使用 G1-001 的 `enP8p1s0`、`dwbc`、默认 tmux session 和单线程参数；现场命令不重复填写这些默认值。
 
 - 必须有人在环、可靠支撑、急停操作员和清场。
 - 未经当次明确授权，不得停止、启动或重启真机控制进程。
 - 旧版和新版不得同时运行。
 - 右膝机械/电气复查未通过前，只允许零速检查。
 - 有立即危险时使用现场硬件急停；可控时按 `o` 触发 DAMP。
+- 不要整页复制执行，必须逐步确认。
 
 ## 1. 版本和进程（只读）
 
@@ -32,11 +31,11 @@ git describe --tags --exact-match
 pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py|[b]ox_demo_main.py|[b]ox_agent_tools_server.py|[o]nboard_runtime.motion_bus|[s]tart_g1_onboard'
 ```
 
-必须确认：标签为 `g001-runtime-refactor-v1.2`、源码 clean，并记下现有进程。不要直接杀进程。
+必须确认标签为 `g001-runtime-refactor-v1.3`、源码 clean，并记下现场进程。不要直接杀进程。
 
 ## 2. 运控 preflight 和启动
 
-只有相关旧 demo 控制进程已经由现场人员授权并在原终端正常退出后，才执行：
+只有相关旧 demo 进程已经由现场人员授权并在原终端正常退出后，才执行：
 
 ```bash
 cd /home/unitree/releases/agile-demo-refactor
@@ -45,7 +44,7 @@ bash box_demo_groot/start_g1_onboard_runtime_taptap.sh \
   --preflight-only
 ```
 
-必须看到 `preflight passed; nothing started`。`--no-manip-ingress` 和 `--preflight-only` 必须保留。
+必须看到 `preflight passed; nothing started`。
 
 获得本次新版运控启动授权后：
 
@@ -55,15 +54,11 @@ bash box_demo_groot/start_g1_onboard_runtime_taptap.sh \
   --human-approved-control-start
 ```
 
-launcher 会自动激活 Conda 并进入默认 tmux session `g1-onboard-runtime`。先保持零速度 60 秒，不按运动键。SSH 断开后可重新连接：
-
-```bash
-tmux attach -t g1-onboard-runtime
-```
+launcher 会自动激活 Conda 并进入默认 tmux session `g1-onboard-runtime`。先保持零速度 60 秒，不按运动键。
 
 ## 3. 运控 health
 
-另一终端不需要激活 Conda：
+另一终端执行：
 
 ```bash
 cd /home/unitree/releases/agile-demo-refactor
@@ -80,33 +75,108 @@ adapter: healthy=true, cycle_p99_ms <= 40, cycle_max_ms <= 60
 merger:  healthy=true, motion_stream_fresh=true, motion_health_ok=true
 ```
 
-任一项不满足：不运动，获得停止授权后执行第 7 步。
+任一项不满足：不启动导航、不运动。
 
-## 4. 键盘最小测试（逐项授权）
+## 4. 导航 profile 和 preflight
 
-只有右膝复查已经通过，才允许执行：
-
-1. 在 keyboard pane 按 `space`，确认零速度。
-2. 获得本次动作授权后短按一次 `w`，立即按 `space`。
-3. 等待站稳，重新执行第 3 步 health 检查。
-
-当前不测试后退、横移、转向、深蹲、连续行走、1 m/s 或圆弧。
-
-## 5. 冷操控 403
-
-保持底座零速度。操控入口使用 `robojudo_zihou2`：
+新终端加载导航环境：
 
 ```bash
-ssh unitree@10.33.12.89
+source /home/unitree/miniconda3/etc/profile.d/conda.sh
+conda activate nav
+source /opt/ros/humble/setup.bash
+source /home/unitree/unitree_ros2/install/setup.bash
+cd /home/unitree/releases/agile-demo-refactor
+```
+
+先校验 profile：
+
+```bash
+python onboard_runtime/nav_profile.py validate \
+  --input /tmp/groot_nav_motion_profile.json \
+  --expected-socket /tmp/groot_motion_bus.sock
+```
+
+必须看到 `G1-001 navigation profile matches preserved legacy defaults`。该检查会确认旧版的 `precise`、关闭 warmup、速度下限、站高和速度上限；不一致时禁止启动导航。
+
+它校验的是旧真机实际默认值：站高/行走下限 `0.76/0.72 m`，warmup `false/0.0 s/0.15 m/s`，前进/后退/横移/偏航上限 `0.50/0.20/0.30/0.60`，横移巡航 `0.20`，线速度/角速度下限 `0.12/0.10`。不要在现场手工改这些参数。
+
+检查导航输入：
+
+```bash
+ros2 topic list | grep -E '/camera/captured_(image|depth)|/dog_odom|/safety/lidar_state'
+ros2 topic echo --once /safety/lidar_state
+```
+
+图像、深度、里程计或 LiDAR 状态缺失，或者 LiDAR 不为安全状态时停止。
+
+执行导航 preflight：
+
+```bash
+bash nav_uat_overlay/start_nav_refactored.sh \
+  --config config_g001 \
+  --preflight-only
+```
+
+必须看到 profile 校验成功和 `navigation preflight passed`。
+
+## 5. 启动导航和最小动作
+
+获得本次导航启动授权后，在导航终端前台执行：
+
+```bash
+bash nav_uat_overlay/start_nav_refactored.sh \
+  --config config_g001 \
+  --human-approved-control-start
+```
+
+不要直接执行 `python run_ros.py`。
+
+另一导航环境终端先检查：
+
+```bash
+ros2 topic echo --once /nav/status
+ros2 service call /nav/get_pose std_srvs/srv/Trigger '{}'
+```
+
+只有 status 为 idle、pose 可用、右膝复查通过且现场重新授权，才做下面动作。
+
+前进 `0.10 m`：
+
+```bash
+ros2 topic pub --once /nav/forward_cmd geometry_msgs/msg/Twist \
+  '{linear: {x: 0.10, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}'
+```
+
+等待站稳，检查 `/nav/status` 和第 3 节 health，然后发送零速请求：
+
+```bash
+ros2 topic pub --once /nav/stop_cmd std_msgs/msg/Empty '{}'
+```
+
+只有前一步完全正常并再次获得授权，才左转 `10°`：
+
+```bash
+ros2 topic pub --once /nav/rotate_cmd geometry_msgs/msg/Twist \
+  '{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.174532925}}'
+```
+
+再次等待站稳、检查 status 和 health，并发送 `/nav/stop_cmd`。
+
+首轮不测试后退、横移、右转、文本目标、连续路线、1 m/s、深蹲或圆弧。
+
+## 6. 冷操控 403
+
+保持导航 idle、底座零速度。操控入口使用 `robojudo_zihou2`：
+
+```bash
 source /home/unitree/miniconda3/etc/profile.d/conda.sh
 conda activate robojudo_zihou2
 cd /home/unitree/releases/agile-demo-refactor/box_demo_2
 python box_agent_tools_server.py
 ```
 
-不要添加 `--allow-execute`。默认地址为 `127.0.0.1:5055`，不会初始化 DDS、相机、IK 或 mover。
-
-另一终端验证：
+不要添加 `--allow-execute`。另一终端验证：
 
 ```bash
 curl -i -X POST http://127.0.0.1:5055/tools/manipulate_object \
@@ -115,33 +185,18 @@ curl -i -X POST http://127.0.0.1:5055/tools/manipulate_object \
 pgrep -af '[b]ox_demo_main.py'
 ```
 
-必须返回 `403 EXECUTION_DISABLED`，且 `box_demo_main.py` 无输出。冷入口 idle CPU 应低于 5%。
+必须返回 `403 EXECUTION_DISABLED`，且 `box_demo_main.py` 无输出。该步骤不能证明真机三模块联跑已经通过。
 
-当前不能据此宣称“导航 + 操控 + 运控”联跑已经通过。
+## 7. 正常停止（需要授权）
 
-## 6. 导航阻断项
+获得停止授权后按顺序执行：
 
-当前禁止启动 `start_nav_refactored.sh`，也禁止发布任何导航 topic。原因：
-
-```text
-旧版：warmup_time=0.0, v_floor=0.12
-当前新版：warmup_time=0.6, v_floor=0.10
-```
-
-解除阻断必须满足：新版 profile 与旧版一致、5080 A/B 覆盖 `config_g001` 和两个 launcher 的真实 profile、发布新代码标签并更新本文。
-
-## 7. 正常停止新版（需要授权）
-
-获得停止授权后：
-
-1. 冷操控终端按 `Ctrl+C`。
-2. keyboard pane 按 `space`，确认零速度，再按 `Ctrl+C`。
-3. 在 tmux 中依次停止 adapter、merger、motion bus；确认前一个进程退出后再停下一个。
-4. 全部进程退出后执行：
-
-```bash
-tmux kill-session -t g1-onboard-runtime
-```
+1. 发布 `/nav/stop_cmd`，确认导航回到 idle。
+2. 在导航启动终端按 `Ctrl+C`，确认 `run_ros.py` 退出。
+3. 冷操控终端按 `Ctrl+C`。
+4. keyboard pane 按 `space`，确认零速度，再按 `Ctrl+C`。
+5. 依次停止 adapter、merger、motion bus；确认前一个退出后再停下一个。
+6. 全部退出后执行 `tmux kill-session -t g1-onboard-runtime`。
 
 最后确认：
 
@@ -149,10 +204,8 @@ tmux kill-session -t g1-onboard-runtime
 pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py|[b]ox_demo_main.py|[b]ox_agent_tools_server.py|[o]nboard_runtime.motion_bus'
 ```
 
-应无新版相关输出。不要手工删除 socket、health 文件或 safety journal。
-
 ## 紧急情况
 
-1. 有立即危险时，现场人员直接使用硬件急停；可控时按 `o` 触发 DAMP。
-2. 只有确认软件仍响应且没有立即危险时，才按 `space` 请求零速度。
+1. 有立即危险时直接使用现场硬件急停；可控时按 `o` 触发 DAMP。
+2. `/nav/stop_cmd` 和 `space` 都不是硬件急停。
 3. 停止测试，不清锁、不重启、不回滚，先查明原因。

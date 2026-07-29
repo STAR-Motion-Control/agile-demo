@@ -8,9 +8,9 @@
 /home/unitree/releases/agile-demo-refactor
 ```
 
-新版部署标签为 `g001-runtime-refactor-v1.2`。目录名不使用 Git 提交哈希；Git 提交号仅作为内部完整性记录。
+新版部署标签为 `g001-runtime-refactor-v1.3`。目录名不使用 Git 提交哈希；Git 提交号仅作为内部完整性记录。
 
-当前标签有一个已确认的导航阻断项：新版 runtime profile 未保留旧 launcher 的 `warmup_time=0.0` 和 `v_floor=0.12`。当前允许运控 preflight、零速 health、右膝复查通过后的单次键盘小动作和冷操控 403；禁止启动导航、发送导航命令和真实操控。
+当前标签已将导航 profile 的行为参数同步为旧真机 launcher 的实际默认值。5080 已验证旧、新 launcher profile 的命令规划与 MuJoCo 路线等价；这只是导航逻辑和速度契约验证，不代表真机位移、Jetson CPU 或三模块联合负载已经通过。
 
 本文中的控制启动、停止、运动、导航和操控命令都只能由现场人员在机器人旁、完成安全检查并对当次操作明确授权后执行。代码同步、Git 校验和只读状态检查不代表已经获得控制授权。
 
@@ -46,7 +46,7 @@
 
 ```text
 运控：box_demo_groot/start_g1_onboard_runtime_taptap.sh
-导航：nav_uat_overlay/start_nav_refactored.sh --config config_g001（当前标签禁止启动）
+导航：nav_uat_overlay/start_nav_refactored.sh --config config_g001
 操控：box_demo_2/box_agent_tools_server.py
 ```
 
@@ -54,13 +54,13 @@
 
 ```text
 运控：由 launcher 自动激活 Conda，现场不手工激活或填写 CONDA_ENV。
-导航：使用 nav 环境；当前标签禁止启动。
+导航：使用 nav 环境。
 操控：使用 robojudo_zihou2 环境。
 ```
 
 Conda 自动激活只是 launcher 的运行机制，不表示运控业务绑定到某个环境。本文沿用该机制，不修改、不覆盖，也不额外探测环境。
 
-`config_g001` 保留了现场外置相机、5 FPS、开环模式和现场地图副本，并把旧 HTTP/JSON 命令链替换为 motion bus；但当前 launcher profile 参数尚未与旧版对齐，因此不能声称导航逻辑和实际速度已经等价。
+`config_g001` 保留了现场外置相机、5 FPS、开环模式和现场地图副本，并把旧 HTTP/JSON 命令链替换为 motion bus。新 launcher 会显式写入旧版 profile 的完整行为参数，`config_g001` 启动前会强制校验，不再依赖 YAML fallback。
 
 ## 3. 同步后只读验收
 
@@ -78,7 +78,7 @@ git log -1 --oneline
 
 - `pwd` 为 `/home/unitree/releases/agile-demo-refactor`。
 - 当前分支为 `runtime-refactor-v1`。
-- 当前标签为 `g001-runtime-refactor-v1.2`。
+- 当前标签为 `g001-runtime-refactor-v1.3`。
 - `git status --short` 没有源码修改。ONNX 模型受 `.gitignore` 管理，不应形成源码 dirty 状态。
 
 确认新目录不是旧目录的软链接：
@@ -221,7 +221,7 @@ bash box_demo_groot/start_g1_onboard_runtime_taptap.sh \
   --preflight-only
 ```
 
-必须看到 `preflight passed; nothing started`。若检测到旧进程、已有 tmux、网卡地址错误、MCU 不可达或必需源码/依赖路径缺失，停止测试。新版 preflight 不会自动改网卡，也不会杀旧进程；它不检查 ONNX 内容，也不证明导航配置、相机、地图和运动 profile 已经通过。
+必须看到 `preflight passed; nothing started`。若检测到旧进程、已有 tmux、网卡地址错误、MCU 不可达或必需源码/依赖路径缺失，停止测试。新版 preflight 不会自动改网卡，也不会杀旧进程；它不检查 ONNX 内容，也不证明导航相机、地图或定位已经可用。
 
 这里不填写 `IFACE`、`dwbc`、线程数或 session 名：它们已有 G1-001 默认值。`--no-manip-ingress` 和 `--preflight-only` 是本步骤必须保留的安全参数。
 
@@ -263,33 +263,118 @@ cd /home/unitree/releases/agile-demo-refactor
 
 只有右膝机械/电气复查通过且现场人员逐项授权后，才允许在 keyboard pane 按 `space`、短按一次 `w` 并立即再按 `space`。等待站稳后重新执行第 9 节 health。当前不测试后退、横移、转向、深蹲、连续行走、1 m/s 或圆弧。
 
-## 11. 导航阻断项
+## 11. 导航 profile 与 preflight
 
-当前标签禁止启动导航，也禁止执行导航 preflight 后继续启动。原因不是 `nav` 环境：真机已经确认 `nav`、ROS 2 Humble 和 Unitree overlay 可用。真正的阻断项是 launcher 生成的运动 profile 不等价：
+这一节必须在新版 runtime 成功启动且第 9 节 health 通过后执行。runtime 启动时才会原子写入当次实际 profile。
 
-```text
-旧真机 launcher：warmup_time=0.0, v_floor=0.12
-当前新版：      warmup_time=0.6, v_floor=0.10
+在新终端加载真机原有导航环境：
+
+```bash
+source /home/unitree/miniconda3/etc/profile.d/conda.sh
+conda activate nav
+source /opt/ros/humble/setup.bash
+source /home/unitree/unitree_ros2/install/setup.bash
+cd /home/unitree/releases/agile-demo-refactor
 ```
 
-当前 5080 A/B 脚本只覆盖 `config` 和 `config_bk`，并用固定 mover 参数运行；它没有覆盖 `config_g001` 和两个 launcher 实际生成的 profile。因此不得引用“744 帧一致”证明当前部署的导航逻辑或速度不变。
+先校验 runtime 刚生成的 profile：
 
-解除阻断前必须完成：
+```bash
+python onboard_runtime/nav_profile.py validate \
+  --input /tmp/groot_nav_motion_profile.json \
+  --expected-socket /tmp/groot_motion_bus.sock
+```
 
-1. 新 launcher 明确生成与旧版一致的 `motion_profile`、`warmup_time`、`warmup_speed`、`v_floor` 和 `w_floor`。
-2. 5080 A/B 从旧/新 launcher 生成各自 profile，并覆盖 `config_g001`。
-3. 比较前进、后退、横移和旋转的计划速度、持续时间、命令帧及停止帧。
-4. 发布新的代码标签并再次更新本文。
+必须看到 `G1-001 navigation profile matches preserved legacy defaults`。校验项是从旧真机 `start_g1_onboard_nav.sh` 实际默认值提取的：
 
-修复后的速度验收要求仍为：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.20 m/s`、转向 `0.40 rad/s`；真机首轮动作仍只允许 `0.10 m` 和 `10 度`。当前标签下这些值仅是验收规范，不是执行许可。
+```text
+motion_profile=precise
+stand_height=0.76
+walk_min_height=0.72
+warmup_enabled=false
+warmup_time=0.0
+warmup_speed=0.15
+fwd_max=0.50
+back_max=0.20
+lat_max=0.30
+yaw_max=0.60
+lat_cruise=0.20
+v_floor=0.12
+w_floor=0.10
+waist_to_rl_on_motion=true
+```
 
-## 12. 当前允许的性能采集
+任一项不一致都不启动导航；不手工修改 JSON、YAML 或环境变量绕过检查。
 
-当前允许采集 S0 运控零速、单次键盘小动作和冷操控入口空闲数据。不得采集或宣称导航联合负载结果，也不得宣称“导航 + 操控 + 运控”已经完成真机验证。
+再检查现场导航输入：
 
-## 13. 操控冷入口测试
+```bash
+ros2 topic list | grep -E '/camera/captured_(image|depth)|/dog_odom|/safety/lidar_state'
+ros2 topic echo --once /safety/lidar_state
+```
 
-保持底座零速度并确认导航未运行。新版 runtime 使用 `--no-manip-ingress` 启动，因此 5055 端口应空闲；若已有监听者，停止本节，不抢占端口：
+图像、深度、里程计或 LiDAR 状态缺失/陈旧时停止，不手工发布安全状态绕过监控。上述 ROS 检查会临时创建 DDS participant/subscriber，不要与 CPU 基线采样同时进行。
+
+执行导航 preflight：
+
+```bash
+bash nav_uat_overlay/start_nav_refactored.sh \
+  --config config_g001 \
+  --preflight-only
+```
+
+必须同时看到 profile 校验成功和 `navigation preflight passed`。这里不填 `--native-threads`，因为 launcher 的 G1-001 默认值已经是 1。
+
+## 12. 导航 idle 与最小动作
+
+现场人员明确批准本次导航启动后，在导航终端前台执行：
+
+```bash
+bash nav_uat_overlay/start_nav_refactored.sh \
+  --config config_g001 \
+  --human-approved-control-start
+```
+
+不要直接执行 `python run_ros.py`，也不要手工设置内部授权环境变量。在另一个已加载同样导航环境的终端检查：
+
+```bash
+ros2 topic echo --once /nav/status
+ros2 service call /nav/get_pose std_srvs/srv/Trigger '{}'
+```
+
+`/nav/status` 必须为 idle，pose 必须可用。右膝机械/电气复查未通过时停在 S1 idle，不发送任何运动命令。
+
+只有现场对本次动作再次授权，才发送 `0.10 m` 前进：
+
+```bash
+ros2 topic pub --once /nav/forward_cmd geometry_msgs/msg/Twist \
+  '{linear: {x: 0.10, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}'
+```
+
+等待站稳，重新检查 `/nav/status`、pose 和第 9 节 health，然后发送零速请求：
+
+```bash
+ros2 topic pub --once /nav/stop_cmd std_msgs/msg/Empty '{}'
+```
+
+只有前一步完全正常且现场对本次转向再次授权，才发送 `10°` 左转：
+
+```bash
+ros2 topic pub --once /nav/rotate_cmd geometry_msgs/msg/Twist \
+  '{linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.174532925}}'
+```
+
+再次等待站稳，检查 status、pose 和 health，并发送 `/nav/stop_cmd`。首轮不测试后退、横移、右转、文本目标、连续路线、1 m/s、深蹲或圆弧。
+
+旧版的导航巡航速度契约仍为：前进 `0.40 m/s`、后退 `0.20 m/s`、横移 `0.20 m/s`、转向 `0.40 rad/s`。这些是代码回归值，不是首轮真机的执行许可。
+
+## 13. 当前允许的性能采集
+
+当前允许采集 S0 运控零速、S1 导航 idle、逐项授权后的 S2 最小动作和 C0 冷操控入口数据。这些阶段数据可用于真机 A/B，但不得宣称“导航 + 真实操控 + 运控”已经完成真机验证。
+
+## 14. 操控冷入口测试
+
+保持导航 idle 和底座零速度。新版 runtime 使用 `--no-manip-ingress` 启动，因此 5055 端口应空闲；若已有监听者，停止本节，不抢占端口：
 
 ```bash
 ss -ltnp | grep ':5055' || true
@@ -324,11 +409,11 @@ ps -eLo pid,tid,pcpu,stat,comm,args --sort=-pcpu | head -80 \
   | tee "$TEST_RESULT_DIR/cold_manip_threads.txt"
 ```
 
-## 14. 真实操控和全链路阻断
+## 15. 真实操控和全链路阻断
 
-当前标签不提供 `--allow-execute` 的现场执行步骤，也不允许真实抓取。导航 profile 修复、导航回归和右膝复查完成后，真实操控仍需另行发布测试指引并获得当次授权。
+当前标签不提供 `--allow-execute` 的现场执行步骤，也不允许真实抓取。真实操控和完整三模块联跑仍需另行测试指引和当次授权。
 
-## 15. 当前测试阶段
+## 16. 当前测试阶段
 
 当前标签只允许以下状态：
 
@@ -337,9 +422,9 @@ ps -eLo pid,tid,pcpu,stat,comm,args --sort=-pcpu | head -80 \
 | R0 | 现有现场进程只读检查 | 允许，不改变进程状态 |
 | P0 | 静态配置和 preflight | 旧控制进程退出后允许 |
 | S0 | 新版 motion bus + merger + adapter | 允许零速度；右膝通过后允许单次键盘小动作 |
-| C0 | S0 + 冷操控入口 | 只允许验证 403，禁止执行动作 |
-| S1 | S0 + 导航 idle | 阻断 |
-| S2 | S1 + 导航运动 | 阻断 |
+| S1 | S0 + 导航 idle | profile、preflight 和 health 通过后，获得启动授权才允许 |
+| S2 | S1 + 导航运动 | 仅逐项授权的 `0.10 m` 前进和 `10°` 左转 |
+| C0 | S1 idle + 冷操控入口 | 只允许验证 403，禁止操控执行 |
 | S3/S4 | 真实操控或三模块联跑 | 阻断 |
 
 各阶段可保存：
@@ -359,22 +444,24 @@ ps -eLo pid,tid,psr,pcpu,stat,comm,args --sort=-pcpu
 - merger motion stream 持续 fresh，RL age 不超过 0.12 s。
 - 冷操控入口 idle CPU 不超过 5%，不创建 DDS/相机/IK 子进程。
 
-这些数据不能形成导航联合负载结论。未来结论必须来自同一真机、相同条件下的 A/B；5080 仿真不能代替 Jetson 真机 CPU 与步态结论。
+只有同一真机、相同条件下的 A/B 才能形成 Jetson CPU 与步态结论。S1/S2 可形成导航 + 运控阶段结果；C0 的操控仅是冷入口，不能称为真实三模块联跑。5080 仿真不能代替真机结论。
 
-## 16. 异常处理
+## 17. 异常处理
 
 1. 有立即危险时，现场人员直接使用硬件急停；可控时按 `o` 触发 DAMP。
 2. 只有确认软件仍响应且没有立即危险时，才按 `space` 请求零速度。
 3. 停止测试，不清锁、不重启、不回滚，先查明原因。
 
-## 17. 有序停止新版
+## 18. 有序停止新版
 
 停止本身需要当次明确授权。按以下顺序执行：
 
-1. 冷操控入口若在运行，在其原终端按 `Ctrl+C`。
-2. keyboard pane 按 `space`，确认零速度，再按 `Ctrl+C`。
-3. 在 tmux 中依次停止 adapter、merger、motion bus；确认前一个进程已经退出后再停下一个。
-4. 全部控制进程退出后，才清理默认 session：
+1. 若导航在运行，先发布 `/nav/stop_cmd`，确认 `/nav/status` 回到 idle。
+2. 在导航启动的原终端按 `Ctrl+C`，确认 `run_ros.py` 退出。
+3. 冷操控入口若在运行，在其原终端按 `Ctrl+C`。
+4. keyboard pane 按 `space`，确认零速度，再按 `Ctrl+C`。
+5. 在 tmux 中依次停止 adapter、merger、motion bus；确认前一个进程已经退出后再停下一个。
+6. 全部控制进程退出后，才清理默认 session：
 
 ```bash
 tmux kill-session -t g1-onboard-runtime
@@ -388,19 +475,21 @@ pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py
 
 应无新版相关输出。不要手工删除 socket、health 文件或 safety journal。
 
-## 18. 回滚边界
+## 19. 回滚边界
 
 只有确认新版全部退出、机器人受支撑且现场人员明确批准后，才允许恢复旧版。必须重新读取现场状态，并使用第 5 节记录的原启动命令；本文不提供固定的可复制回滚命令，避免猜测或混启旧拓扑。
 
-## 19. 结果记录模板
+## 20. 结果记录模板
 
 每轮填写：
 
 ```text
 日期/操作员：
-部署标签：g001-runtime-refactor-v1.2
+部署标签：g001-runtime-refactor-v1.3
 新目录：/home/unitree/releases/agile-demo-refactor
-测试阶段：R0 / P0 / S0 / C0
+测试阶段：R0 / P0 / S0 / S1 / S2 / C0
+导航 profile 校验：通过 / 不通过
+导航动作、授权与执行时间：
 电池/功率模式/温度：
 现场负载和地面：
 CPU idle median/min：
@@ -412,6 +501,7 @@ rt/lowcmd_rl Hz：
 相机 CPU/线程：
 robot_status CPU/线程：
 run_ros CPU/线程：
+导航动作后 status/pose/health：
 冷操控 idle CPU/线程/子进程数：
 操控请求和结果：
 是否出现步态不稳定：
