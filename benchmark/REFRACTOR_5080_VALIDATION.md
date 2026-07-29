@@ -36,6 +36,8 @@ rgbd_server:
 各自订阅本进程发布的 RGB-D 话题。因此保留了原始相机速率、depth
 数据和对外话题，同时消除两组内部 message-filter/CvBridge 回环。
 
+这里的 30 FPS 结论只适用于通用 `config`/`config_bk`。G1-001 现场使用继承 `config_bk` 的 `config_g001`，它保留外置相机 5 FPS，本轮没有把这个现场值改成 30 FPS。
+
 ## 结果
 
 ### 代码与导航契约
@@ -104,7 +106,7 @@ JSON 逐字节一致，SHA256 均为：
 
 ## 2026-07-29 G1-001 旧版导航参数对齐回归
 
-验证提交：`206e05e`
+验证提交：`206e05e`；现场指引修正标签：`g001-runtime-refactor-v1.3.1`
 
 这次回归修正了上述旧报告的一个覆盖缺口。旧报告的 744 帧 A/B 使用了共享的固定 mover 参数，且没有执行真机保留 launcher 的 profile heredoc，因此不能证明 `config_g001` 的实际默认行为不变。该缺口曾经使新版回退到 `warmup_time=0.6` 和 `v_floor=0.10`，而真机旧版实际为 `0.0` 和 `0.12`。
 

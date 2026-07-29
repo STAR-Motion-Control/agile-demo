@@ -8,7 +8,7 @@
 /home/unitree/releases/agile-demo-refactor
 ```
 
-新版部署标签为 `g001-runtime-refactor-v1.3`。目录名不使用 Git 提交哈希；Git 提交号仅作为内部完整性记录。
+新版部署标签为 `g001-runtime-refactor-v1.3.1`。目录名不使用 Git 提交哈希；Git 提交号仅作为内部完整性记录。
 
 当前标签已将导航 profile 的行为参数同步为旧真机 launcher 的实际默认值。5080 已验证旧、新 launcher profile 的命令规划与 MuJoCo 路线等价；这只是导航逻辑和速度契约验证，不代表真机位移、Jetson CPU 或三模块联合负载已经通过。
 
@@ -60,7 +60,7 @@
 
 Conda 自动激活只是 launcher 的运行机制，不表示运控业务绑定到某个环境。本文沿用该机制，不修改、不覆盖，也不额外探测环境。
 
-`config_g001` 保留了现场外置相机、5 FPS、开环模式和现场地图副本，并把旧 HTTP/JSON 命令链替换为 motion bus。新 launcher 会显式写入旧版 profile 的完整行为参数，`config_g001` 启动前会强制校验，不再依赖 YAML fallback。
+`config_g001` 保留了现场外置相机、5 FPS、开环模式和现场地图副本，并把旧 HTTP/JSON 命令链替换为 motion bus。新 launcher 会显式写入旧版 profile 的 14 个行为字段，`config_g001` 启动前会强制校验，这 14 个字段不再回落到 YAML。其他导航参数仍按 `config_g001`/`config_bk` 的原有 YAML 读取。
 
 ## 3. 同步后只读验收
 
@@ -78,7 +78,7 @@ git log -1 --oneline
 
 - `pwd` 为 `/home/unitree/releases/agile-demo-refactor`。
 - 当前分支为 `runtime-refactor-v1`。
-- 当前标签为 `g001-runtime-refactor-v1.3`。
+- 当前标签为 `g001-runtime-refactor-v1.3.1`。
 - `git status --short` 没有源码修改。ONNX 模型受 `.gitignore` 管理，不应形成源码 dirty 状态。
 
 确认新目录不是旧目录的软链接：
@@ -313,7 +313,7 @@ ros2 topic list | grep -E '/camera/captured_(image|depth)|/dog_odom|/safety/lida
 ros2 topic echo --once /safety/lidar_state
 ```
 
-图像、深度、里程计或 LiDAR 状态缺失/陈旧时停止，不手工发布安全状态绕过监控。上述 ROS 检查会临时创建 DDS participant/subscriber，不要与 CPU 基线采样同时进行。
+图像、深度或里程计缺失/陈旧时停止。LiDAR 回复只接受 `data: clear`；`blocked`、`stale`、`unknown`、无消息或其他值都停止，不手工发布安全状态绕过监控。上述 ROS 检查会临时创建 DDS participant/subscriber，不要与 CPU 基线采样同时进行。
 
 执行导航 preflight：
 
@@ -342,7 +342,18 @@ ros2 topic echo --once /nav/status
 ros2 service call /nav/get_pose std_srvs/srv/Trigger '{}'
 ```
 
-`/nav/status` 必须为 idle，pose 必须可用。右膝机械/电气复查未通过时停在 S1 idle，不发送任何运动命令。
+`/nav/status` 必须同时显示任务 idle、`lidar_safety.state=clear` 和 `lidar_safety.paused=false`，pose 必须可用。导航进程启动时 LiDAR 初值是 `unknown`，因此不能用启动前的 topic echo 代替这项启动后检查。
+
+保持导航 idle 至少 60 秒，然后在检查终端重新读取 S1 负载下的 runtime health 并采样 CPU：
+
+```bash
+/usr/bin/python3 -m onboard_runtime.runtime_ctl status
+/usr/bin/python3 -m json.tool /tmp/groot_adapter_health.json
+/usr/bin/python3 -m json.tool /tmp/groot_merger_health.json
+vmstat 1 60
+```
+
+必须仍满足第 9 节的所有 health 门；忽略 `vmstat` 首个累计行后，后续 `id` 不低于 20%。任一项失败就停在 S1，不进入 S2。右膝机械/电气复查未通过时也只能停在 S1 idle。
 
 只有现场对本次动作再次授权，才发送 `0.10 m` 前进：
 
@@ -422,8 +433,8 @@ ps -eLo pid,tid,pcpu,stat,comm,args --sort=-pcpu | head -80 \
 | R0 | 现有现场进程只读检查 | 允许，不改变进程状态 |
 | P0 | 静态配置和 preflight | 旧控制进程退出后允许 |
 | S0 | 新版 motion bus + merger + adapter | 允许零速度；右膝通过后允许单次键盘小动作 |
-| S1 | S0 + 导航 idle | profile、preflight 和 health 通过后，获得启动授权才允许 |
-| S2 | S1 + 导航运动 | 仅逐项授权的 `0.10 m` 前进和 `10°` 左转 |
+| S1 | S0 + 导航 idle | profile/preflight 通过且获得启动授权后允许；需 idle 60 秒并重新通过 LiDAR、health 和 CPU 门 |
+| S2 | S1 + 导航运动 | 只有 S1 负载门通过后，才允许逐项授权的 `0.10 m` 前进和 `10°` 左转 |
 | C0 | S1 idle + 冷操控入口 | 只允许验证 403，禁止操控执行 |
 | S3/S4 | 真实操控或三模块联跑 | 阻断 |
 
@@ -485,10 +496,11 @@ pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py
 
 ```text
 日期/操作员：
-部署标签：g001-runtime-refactor-v1.3
+部署标签：g001-runtime-refactor-v1.3.1
 新目录：/home/unitree/releases/agile-demo-refactor
 测试阶段：R0 / P0 / S0 / S1 / S2 / C0
 导航 profile 校验：通过 / 不通过
+导航 idle 60 秒后 LiDAR/S1 health/CPU：
 导航动作、授权与执行时间：
 电池/功率模式/温度：
 现场负载和地面：

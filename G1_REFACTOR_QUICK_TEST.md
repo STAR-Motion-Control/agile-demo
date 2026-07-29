@@ -2,7 +2,7 @@
 
 新版目录：`/home/unitree/releases/agile-demo-refactor`
 
-适用标签：`g001-runtime-refactor-v1.3`
+适用标签：`g001-runtime-refactor-v1.3.1`
 
 本标签已把导航 profile 同步为旧真机 launcher 的默认参数。5080 已验证旧、新 profile 的命令规划和 MuJoCo 路线一致；这不等于真机位移、Jetson CPU 或三模块联合负载已经通过。
 
@@ -31,7 +31,7 @@ git describe --tags --exact-match
 pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py|[b]ox_demo_main.py|[b]ox_agent_tools_server.py|[o]nboard_runtime.motion_bus|[s]tart_g1_onboard'
 ```
 
-必须确认标签为 `g001-runtime-refactor-v1.3`、源码 clean，并记下现场进程。不要直接杀进程。
+必须确认标签为 `g001-runtime-refactor-v1.3.1`、源码 clean，并记下现场进程。不要直接杀进程。
 
 ## 2. 运控 preflight 和启动
 
@@ -108,7 +108,7 @@ ros2 topic list | grep -E '/camera/captured_(image|depth)|/dog_odom|/safety/lida
 ros2 topic echo --once /safety/lidar_state
 ```
 
-图像、深度、里程计或 LiDAR 状态缺失，或者 LiDAR 不为安全状态时停止。
+图像、深度或里程计缺失时停止。LiDAR 回复只接受 `data: clear`；`blocked`、`stale`、`unknown`、无消息或其他值都不启动导航。
 
 执行导航 preflight：
 
@@ -139,7 +139,15 @@ ros2 topic echo --once /nav/status
 ros2 service call /nav/get_pose std_srvs/srv/Trigger '{}'
 ```
 
-只有 status 为 idle、pose 可用、右膝复查通过且现场重新授权，才做下面动作。
+`/nav/status` 必须同时显示任务 idle、`lidar_safety.state=clear` 和 `lidar_safety.paused=false`，pose 必须可用。不能用启动前的 LiDAR echo 代替这项启动后检查。
+
+保持导航 idle 60 秒，重新执行第 3 节的三个 health 命令，再采样 CPU：
+
+```bash
+vmstat 1 60
+```
+
+必须仍满足第 3 节 health；忽略 `vmstat` 首个累计行后，后续 `id` 不低于 20%。只有这个 S1 负载门通过、右膝复查通过且现场重新授权，才做下面动作。
 
 前进 `0.10 m`：
 
