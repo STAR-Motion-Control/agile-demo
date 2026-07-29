@@ -2,7 +2,7 @@
 
 新版目录：`/home/unitree/releases/agile-demo-refactor`
 
-适用标签：`g001-runtime-refactor-v1.3.1`
+适用标签：`g001-runtime-refactor-v1.3.2`
 
 本标签已把导航 profile 同步为旧真机 launcher 的默认参数。5080 已验证旧、新 profile 的命令规划和 MuJoCo 路线一致；这不等于真机位移、Jetson CPU 或三模块联合负载已经通过。
 
@@ -28,10 +28,10 @@ ssh unitree@10.33.12.89
 cd /home/unitree/releases/agile-demo-refactor
 git status --short --branch
 git describe --tags --exact-match
-pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py|[b]ox_demo_main.py|[b]ox_agent_tools_server.py|[o]nboard_runtime.motion_bus|[s]tart_g1_onboard'
+pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py|[a]gile_runtime_keyboard.py|[b]ox_demo_main.py|[b]ox_agent_tools_server.py|[o]nboard_runtime.motion_bus|[s]tart_g1_onboard'
 ```
 
-必须确认标签为 `g001-runtime-refactor-v1.3.1`、源码 clean，并记下现场进程。不要直接杀进程。
+必须确认标签为 `g001-runtime-refactor-v1.3.2`、源码 clean，并记下现场进程。不要直接杀进程。
 
 ## 2. 运控 preflight 和启动
 
@@ -149,6 +149,16 @@ vmstat 1 60
 
 必须仍满足第 3 节 health；忽略 `vmstat` 首个累计行后，后续 `id` 不低于 20%。只有这个 S1 负载门通过、右膝复查通过且现场重新授权，才做下面动作。
 
+申请动作授权前，最后再读一次新鲜安全状态：
+
+```bash
+ros2 topic echo --once /safety/lidar_state
+ros2 topic echo --once /nav/status
+ros2 service call /nav/get_pose std_srvs/srv/Trigger '{}'
+```
+
+必须再次看到 `data: clear`、任务 idle、`lidar_safety.state=clear`、`lidar_safety.paused=false` 和可用 pose；否则不运动。
+
 前进 `0.10 m`：
 
 ```bash
@@ -209,7 +219,7 @@ pgrep -af '[b]ox_demo_main.py'
 最后确认：
 
 ```bash
-pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py|[b]ox_demo_main.py|[b]ox_agent_tools_server.py|[o]nboard_runtime.motion_bus'
+pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py|[a]gile_runtime_keyboard.py|[b]ox_demo_main.py|[b]ox_agent_tools_server.py|[o]nboard_runtime.motion_bus'
 ```
 
 ## 紧急情况

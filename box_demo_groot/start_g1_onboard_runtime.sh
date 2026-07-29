@@ -212,7 +212,7 @@ if ! ping -c1 -W1 192.168.123.161 >/dev/null 2>&1; then
 fi
 
 BUSY="$(pgrep -af \
-    "merge_lowcmd_arm_sdk.py|groot_wbc_boxdemo_adapter.py|run_g1_control_loop|onboard_runtime.motion_bus|box_demo_main.py|box_agent_tools_server.py|run_ros.py|agile_http_ipc_server.py|agile_keyboard_control.py|agile_lowcmd_pipeline.py|groot_wbc_keyboard.py|keyboard_arm_hang.py" \
+    "merge_lowcmd_arm_sdk.py|groot_wbc_boxdemo_adapter.py|run_g1_control_loop|onboard_runtime.motion_bus|box_demo_main.py|box_agent_tools_server.py|run_ros.py|agile_runtime_keyboard.py|agile_http_ipc_server.py|agile_keyboard_control.py|agile_lowcmd_pipeline.py|groot_wbc_keyboard.py|keyboard_arm_hang.py" \
     2>/dev/null | grep -vE '^[0-9]+ +tmux' || true)"
 if [[ -n "$BUSY" ]]; then
     echo "existing control/runtime process detected; refusing to overlap:"

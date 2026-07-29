@@ -249,6 +249,21 @@ def test_launcher_failure_cleanup_is_scoped_to_created_session():
     assert "STARTUP_COMPLETE=1\ntrap - EXIT" in launcher
 
 
+def test_launcher_busy_guard_covers_runtime_keyboard():
+    launcher = (
+        Path(__file__).resolve().parents[2]
+        / "box_demo_groot"
+        / "start_g1_onboard_runtime.sh"
+    ).read_text(encoding="utf-8")
+    busy_guard = launcher[
+        launcher.index('BUSY="$(pgrep -af') : launcher.index(
+            'if [[ -n "$BUSY" ]]'
+        )
+    ]
+
+    assert "agile_runtime_keyboard.py" in busy_guard
+
+
 def test_core_panes_exec_their_process_after_writing_pid():
     launcher = (
         Path(__file__).resolve().parents[2]
