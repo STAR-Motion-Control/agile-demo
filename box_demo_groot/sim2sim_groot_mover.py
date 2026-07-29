@@ -28,7 +28,8 @@ class SimMover(gm.GrootMover):
     Everything else (planning, phase order, defaults, guards) is the real code."""
 
     def __init__(self, sim, **kw):
-        super().__init__(verbose=False, stand_height=STAND, **kw)
+        stand_height = kw.pop("stand_height", STAND)
+        super().__init__(verbose=False, stand_height=stand_height, **kw)
         self._sim = sim
 
     def _hold(self, forward, lateral, yaw, duration, cancel_event=None):

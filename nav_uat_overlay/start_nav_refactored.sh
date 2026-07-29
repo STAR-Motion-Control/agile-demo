@@ -6,6 +6,7 @@ set -eu
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REFACTOR_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUS_SOCKET="${GROOT_MOTION_BUS_SOCKET:-/tmp/groot_motion_bus.sock}"
+NAV_PROFILE_FILE="${GROOT_NAV_MOTION_PROFILE_FILE:-/tmp/groot_nav_motion_profile.json}"
 BUS_STATUS="${GROOT_MOTION_BUS_STATUS:-/tmp/groot_motion_bus_status.json}"
 ADAPTER_COMMAND_SOCKET="${GROOT_ADAPTER_COMMAND_SOCKET:-/tmp/groot_adapter_command.sock}"
 MERGER_COMMAND_SOCKET="${GROOT_MERGER_COMMAND_SOCKET:-/tmp/groot_merger_command.sock}"
@@ -57,6 +58,12 @@ python "$SCRIPT_DIR/src/runtime_preflight.py" \
     --required-health-file "$ADAPTER_HEALTH_FILE" \
     --required-health-file "$MERGER_HEALTH_FILE" \
     --max-age-s 2.0
+
+if [[ "$CONFIG_NAME" == "config_g001" ]]; then
+    python "$REFACTOR_ROOT/onboard_runtime/nav_profile.py" validate \
+        --input "$NAV_PROFILE_FILE" \
+        --expected-socket "$BUS_SOCKET"
+fi
 
 if pgrep -af "python.*run_ros.py" >/dev/null 2>&1; then
     echo "run_ros.py is already running"

@@ -178,6 +178,7 @@ print_config() {
     echo "keyboard=$KEYBOARD"
     echo "manip_ingress=$MANIP_INGRESS ($MANIP_HOST:$MANIP_PORT)"
     echo "manip_vision_log=$MANIP_VISION_LOG"
+    python3 "$REFACTOR_ROOT/onboard_runtime/nav_profile.py" show-contract
 }
 
 if [[ "$PRINT_CONFIG" == "1" ]]; then
@@ -246,36 +247,15 @@ MERGER_PID_FILE="/tmp/groot_runtime_${RUNTIME_ID}_merger.pid"
 ADAPTER_PID_FILE="/tmp/groot_runtime_${RUNTIME_ID}_adapter.pid"
 STARTED_AT="$(python3 -c 'import time; print(time.time())')"
 
-python3 - "$NAV_PROFILE_FILE" "$BUS_SOCKET" "$STAND_HEIGHT" "$WALK_FLOOR" \
-    "$FWD_MAX" "$LAT_MAX" "$YAW_MAX" "$LAT_CRUISE" <<'PY'
-import json
-import os
-import sys
-import tempfile
-import time
-
-path, socket_path, stand, floor, fwd, lat, yaw, lat_cruise = sys.argv[1:]
-payload = {
-    "schema_version": 3,
-    "source": "start_g1_onboard_runtime.sh",
-    "motion_backend": "groot_motion_bus",
-    "motion_bus_socket": socket_path,
-    "stand_height": float(stand),
-    "walk_min_height": float(floor),
-    "fwd_max": float(fwd),
-    "back_max": min(0.20, float(fwd)),
-    "lat_max": float(lat),
-    "yaw_max": float(yaw),
-    "lat_cruise": float(lat_cruise),
-    "updated_at": time.time(),
-}
-directory = os.path.dirname(path) or "/tmp"
-os.makedirs(directory, exist_ok=True)
-fd, temporary = tempfile.mkstemp(prefix=".groot_runtime.", suffix=".json", dir=directory)
-with os.fdopen(fd, "w", encoding="utf-8") as stream:
-    json.dump(payload, stream, separators=(",", ":"))
-os.replace(temporary, path)
-PY
+python3 "$REFACTOR_ROOT/onboard_runtime/nav_profile.py" write \
+    --output "$NAV_PROFILE_FILE" \
+    --motion-bus-socket "$BUS_SOCKET" \
+    --stand-height "$STAND_HEIGHT" \
+    --walk-min-height "$WALK_FLOOR" \
+    --fwd-max "$FWD_MAX" \
+    --lat-max "$LAT_MAX" \
+    --yaw-max "$YAW_MAX" \
+    --lat-cruise "$LAT_CRUISE"
 
 SANITIZE="unset LD_LIBRARY_PATH AMENT_PREFIX_PATH COLCON_PREFIX_PATH ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION ROS_LOCALHOST_ONLY PYTHONPATH"
 SETUP="$SANITIZE; source \$HOME/miniconda3/etc/profile.d/conda.sh && conda activate '$CONDA_ENV' && export UNITREE_DDS_INTERFACE='$IFACE' GROOT_RUNTIME_ID='$RUNTIME_ID' GROOT_MOTION_BUS_SOCKET='$BUS_SOCKET' GROOT_ADAPTER_COMMAND_SOCKET='$ADAPTER_CMD_SOCKET' GROOT_MERGER_COMMAND_SOCKET='$MERGER_CMD_SOCKET' GROOT_ARM_RUNTIME_SOCKET='$ARM_RUNTIME_SOCKET' OMP_NUM_THREADS='$NATIVE_THREADS' OMP_DYNAMIC='FALSE' MKL_NUM_THREADS='$NATIVE_THREADS' OPENBLAS_NUM_THREADS='$NATIVE_THREADS' NUMEXPR_NUM_THREADS='$NATIVE_THREADS' VECLIB_MAXIMUM_THREADS='$NATIVE_THREADS' OPENCV_FOR_THREADS_NUM='$NATIVE_THREADS' PYTHONPATH='$REFACTOR_ROOT:$SDK_ROOT'"

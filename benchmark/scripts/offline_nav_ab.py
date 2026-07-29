@@ -22,6 +22,7 @@ import re
 import statistics
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -34,6 +35,24 @@ DEFAULT_NAV_REFERENCE = "eb1b6e9"
 DEFAULT_CANDIDATE = "HEAD"
 MOVER_PATH = "box_demo_groot/groot_mover.py"
 MOTION_BACKEND_PATH = "nav_uat_overlay/src/Node/motion_backend.py"
+NAV_PROFILE_PATH = "onboard_runtime/nav_profile.py"
+LEGACY_NAV_LAUNCHER_PATH = "box_demo_groot/start_g1_onboard_nav.sh"
+EXPECTED_G001_LEGACY_PROFILE = {
+    "motion_profile": "precise",
+    "stand_height": 0.76,
+    "walk_min_height": 0.72,
+    "warmup_enabled": False,
+    "warmup_time": 0.0,
+    "warmup_speed": 0.15,
+    "fwd_max": 0.50,
+    "back_max": 0.20,
+    "lat_max": 0.30,
+    "yaw_max": 0.60,
+    "lat_cruise": 0.20,
+    "v_floor": 0.12,
+    "w_floor": 0.10,
+    "waist_to_rl_on_motion": True,
+}
 
 
 class ContractError(AssertionError):
@@ -119,6 +138,66 @@ def load_git_module(sources: GitSources, ref: str, path: str, tag: str):
     name = f"_offline_nav_ab_{tag}_{digest}"
     with deterministic_mover_environment():
         return load_module(sources.source(ref, path), name, f"{ref}:{path}")
+
+
+def shell_default(source: str, name: str) -> str:
+    match = re.search(
+        rf'(?m)^{re.escape(name)}="\$\{{[^}}]+:-([^}}]+)\}}"\s*(?:#.*)?$',
+        source,
+    )
+    require(match is not None, f"cannot read {name} default from legacy launcher")
+    return match.group(1)
+
+
+def legacy_launcher_profile(sources: GitSources, ref: str) -> dict[str, Any]:
+    source = sources.source(ref, LEGACY_NAV_LAUNCHER_PATH)
+    command = source.index('python3 - "$NAV_PROFILE_FILE"')
+    body_start = source.index("<<'PY'\n", command) + len("<<'PY'\n")
+    body_end = source.index("\nPY\n", body_start)
+    writer = source[body_start:body_end]
+    warmup_mode = shell_default(source, "WARMUP_MODE")
+    warmup_time = "0.0" if warmup_mode == "off" else shell_default(source, "WARMUP_TIME")
+
+    with tempfile.TemporaryDirectory(prefix="offline-nav-profile-") as directory:
+        path = Path(directory) / "legacy.json"
+        subprocess.run(
+            [
+                sys.executable,
+                "-",
+                str(path),
+                shell_default(source, "NAV_MOTION_PROFILE"),
+                shell_default(source, "STAND_HEIGHT"),
+                shell_default(source, "WALK_FLOOR"),
+                warmup_mode,
+                warmup_time,
+                shell_default(source, "WARMUP_SPEED"),
+                shell_default(source, "FWD_MAX"),
+                shell_default(source, "LAT_MAX"),
+                shell_default(source, "YAW_MAX"),
+                shell_default(source, "LAT_CRUISE"),
+                shell_default(source, "WAIST_RL"),
+            ],
+            input=writer,
+            text=True,
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        return json.loads(path.read_text(encoding="utf-8"))
+
+
+def runtime_launcher_profile(sources: GitSources, ref: str) -> dict[str, Any]:
+    module = load_git_module(sources, ref, NAV_PROFILE_PATH, "nav_profile")
+    return module.build_runtime_profile(
+        motion_bus_socket="/tmp/groot_motion_bus.sock",
+        stand_height=0.76,
+        walk_min_height=0.72,
+        fwd_max=0.50,
+        lat_max=0.30,
+        yaw_max=0.60,
+        lat_cruise=0.20,
+        updated_at=1234.5,
+    )
 
 
 def assert_close(actual: Any, expected: Any, path: str = "value") -> None:
@@ -207,41 +286,16 @@ def normalize_write(args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, 
     }
 
 
-MOVER_KWARGS = {
-    "stand_height": 0.74,
-    "fwd_cruise": 0.40,
-    "back_cruise": 0.20,
-    "lat_cruise": 0.20,
-    "yaw_cruise": 0.40,
-    "fwd_max": 0.50,
-    "back_max": 0.20,
-    "lat_max": 0.40,
-    "yaw_max": 0.60,
-    "v_floor": 0.10,
-    "w_floor": 0.10,
-    "min_duration": 1.0,
-    "min_distance": 0.08,
-    "warmup_time": 0.6,
-    "warmup_speed": 0.15,
-    "settle_before_s": 0.0,
-    "stop_hold_s": 0.4,
-    "walk_min_height": 0.72,
-    "auto_raise_for_walk": False,
-    "dist_gain": 1.0,
-    "recover_each_move": False,
-    "refresh_hz": 20.0,
-    "verbose": False,
-}
-
-
-def trace_move(module: Any, method: str, value: float):
+def trace_move(
+    module: Any, method: str, value: float, mover_kwargs: dict[str, Any]
+):
     clock = VirtualClock()
     module.time = clock
     trace: list[dict[str, Any]] = []
     module.write_command = lambda *args, **kwargs: trace.append(
         normalize_write(args, kwargs)
     )
-    mover = module.GrootMover(cmd_file="/__offline_no_write__.json", **MOVER_KWARGS)
+    mover = module.GrootMover(cmd_file="/__offline_no_write__.json", **mover_kwargs)
     if hasattr(mover, "_motion_cancel"):
         mover._motion_cancel = VirtualEvent(clock)
     plan = getattr(mover, method)(value)
@@ -249,10 +303,18 @@ def trace_move(module: Any, method: str, value: float):
 
 
 def validate_motion_math_and_traces(
-    sources: GitSources, baseline: str, candidate: str
+    sources: GitSources, baseline: str, nav_reference: str, candidate: str
 ) -> dict[str, Any]:
     baseline_module = load_git_module(sources, baseline, MOVER_PATH, "mover_base")
     candidate_module = load_git_module(sources, candidate, MOVER_PATH, "mover_candidate")
+    legacy_profile = legacy_launcher_profile(sources, candidate)
+    runtime_profile = runtime_launcher_profile(sources, candidate)
+    baseline_kwargs = g001_mover_kwargs(
+        sources, nav_reference, legacy_profile, include_g001_overlay=False
+    )
+    candidate_kwargs = g001_mover_kwargs(
+        sources, candidate, runtime_profile, include_g001_overlay=True
+    )
 
     distances = [
         -2.0, -1.0, -0.5, -0.2, -0.081, -0.08, -0.079, -0.03,
@@ -274,7 +336,9 @@ def validate_motion_math_and_traces(
         math_cases += 1
 
     move_cases = {
-        "move_forward": [-0.25, -0.03, 0.0, 0.03, 0.08, 0.25, 1.0],
+        "move_forward": [
+            -0.25, -0.12, -0.10, -0.03, 0.0, 0.03, 0.08, 0.10, 0.12, 0.25, 1.0
+        ],
         "move_left": [-0.15, -0.02, 0.0, 0.02, 0.05, 0.15],
         "rotate": [-math.pi / 2, -0.02, 0.0, 0.02, math.pi / 2],
     }
@@ -282,10 +346,22 @@ def validate_motion_math_and_traces(
     command_frames = 0
     for method, values in move_cases.items():
         for value in values:
-            baseline_plan, baseline_trace = trace_move(baseline_module, method, value)
-            candidate_plan, candidate_trace = trace_move(candidate_module, method, value)
+            baseline_plan, baseline_trace = trace_move(
+                baseline_module, method, value, baseline_kwargs
+            )
+            candidate_plan, candidate_trace = trace_move(
+                candidate_module, method, value, candidate_kwargs
+            )
             assert_close(candidate_plan, baseline_plan, f"{method}[{value}].plan")
             assert_close(candidate_trace, baseline_trace, f"{method}[{value}].trace")
+            if method == "move_forward" and value == 0.10:
+                assert_close(candidate_plan, (0.12, 1.0, 0.12, True), "g001 0.10m plan")
+                nonzero = [frame for frame in candidate_trace if frame["forward"] != 0.0]
+                require(nonzero, "g001 0.10m trace has no motion frames")
+                require(
+                    all(frame["forward"] == 0.12 for frame in nonzero),
+                    "g001 0.10m trace contains a warmup or wrong-speed frame",
+                )
             trace_cases += 1
             command_frames += len(candidate_trace)
 
@@ -468,6 +544,70 @@ def yaml_scalar_paths(source: str) -> dict[str, str]:
     return output
 
 
+def g001_mover_kwargs(
+    sources: GitSources,
+    ref: str,
+    profile: dict[str, Any],
+    *,
+    include_g001_overlay: bool,
+) -> dict[str, Any]:
+    config = yaml_scalar_paths(
+        sources.source(ref, "nav_uat_overlay/src/config_bk.yaml")
+    )
+    if include_g001_overlay:
+        config.update(
+            yaml_scalar_paths(
+                sources.source(ref, "nav_uat_overlay/src/config_g001.yaml")
+            )
+        )
+
+    def value(name: str, default: Any) -> Any:
+        return profile.get(name, config.get(f"motion_backend.{name}", default))
+
+    def number(name: str, default: float) -> float:
+        return float(value(name, default))
+
+    motion_profile = str(value("motion_profile", "precise"))
+    if motion_profile == "keyboard":
+        min_duration = 0.0
+        min_distance = 0.0
+    else:
+        min_duration = number("min_duration", 1.5)
+        min_distance = number("min_distance", 0.08)
+
+    auto_raise = str(value("auto_raise_for_walk", "false")).lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+    return {
+        "stand_height": number("stand_height", 0.76),
+        "fwd_cruise": number("fwd_cruise", 0.40),
+        "back_cruise": number("back_cruise", 0.20),
+        "lat_cruise": number("lat_cruise", 0.20),
+        "yaw_cruise": number("yaw_cruise", 0.40),
+        "fwd_max": number("fwd_max", 0.50),
+        "back_max": number("back_max", 0.20),
+        "lat_max": number("lat_max", 0.30),
+        "yaw_max": number("yaw_max", 0.60),
+        "v_floor": number("v_floor", 0.12),
+        "w_floor": number("w_floor", 0.10),
+        "min_duration": min_duration,
+        "min_distance": min_distance,
+        "warmup_time": number("warmup_time", 0.0),
+        "warmup_speed": number("warmup_speed", 0.15),
+        "settle_before_s": number("settle_before_s", 0.0),
+        "stop_hold_s": number("stop_hold_s", 0.4),
+        "walk_min_height": number("walk_min_height", 0.72),
+        "auto_raise_for_walk": auto_raise,
+        "dist_gain": number("dist_gain", 1.0),
+        "recover_each_move": False,
+        "refresh_hz": 20.0,
+        "verbose": False,
+    }
+
+
 def validate_config_contract(
     sources: GitSources, nav_reference: str, candidate: str
 ) -> dict[str, Any]:
@@ -492,11 +632,15 @@ def validate_config_contract(
         "motion_backend.dist_gain",
     )
     configs: dict[str, Any] = {}
+    reference_configs: dict[str, dict[str, str]] = {}
+    candidate_configs: dict[str, dict[str, str]] = {}
     total_control_keys = 0
     for config_name in ("config", "config_bk"):
         path = f"nav_uat_overlay/src/{config_name}.yaml"
         baseline = yaml_scalar_paths(sources.source(nav_reference, path))
         current = yaml_scalar_paths(sources.source(candidate, path))
+        reference_configs[config_name] = baseline
+        candidate_configs[config_name] = current
         for key in speed_keys:
             require(
                 key in baseline and key in current,
@@ -561,11 +705,71 @@ def validate_config_contract(
             "depth_capture_default": current.get("rgbd_server.capture_depth"),
         }
 
+    g001_source = sources.source(candidate, "nav_uat_overlay/src/config_g001.yaml")
+    require(
+        re.search(r"(?m)^\s*-\s+config_bk\s*$", g001_source) is not None,
+        "config_g001 no longer inherits config_bk",
+    )
+    g001_overlay = yaml_scalar_paths(g001_source)
+    g001_effective = {**candidate_configs["config_bk"], **g001_overlay}
+    for key in speed_keys:
+        require(
+            g001_effective.get(key) == reference_configs["config_bk"].get(key),
+            f"navigation speed changed in config_g001: {key}",
+        )
+    require(
+        g001_effective.get("motion_control.closed_loop.enable") == "false",
+        "config_g001 must preserve the live open-loop mode",
+    )
+    configs["config_g001"] = {
+        "unchanged_speed_keys": len(speed_keys),
+        "inherits": "config_bk",
+        "map_path": g001_effective.get("map_path"),
+        "camera_fps": int(g001_effective.get("rgbd_server.fps", "5")),
+        "closed_loop_enabled": g001_effective.get("motion_control.closed_loop.enable"),
+    }
+
     return {
         "configs": configs,
         "unchanged_speed_keys_total": len(speed_keys) * len(configs),
         "unchanged_closed_loop_keys_total": total_control_keys,
         "baseline_camera_fps_hardcoded": 30,
+    }
+
+
+def validate_g001_runtime_profile_contract(
+    sources: GitSources, nav_reference: str, candidate: str
+) -> dict[str, Any]:
+    module = load_git_module(sources, candidate, NAV_PROFILE_PATH, "nav_profile")
+    legacy_profile = legacy_launcher_profile(sources, candidate)
+    profile = runtime_launcher_profile(sources, candidate)
+    module.validate_g001_legacy_profile(
+        profile, expected_socket="/tmp/groot_motion_bus.sock"
+    )
+    behavior_keys = tuple(EXPECTED_G001_LEGACY_PROFILE)
+    legacy_behavior = {key: legacy_profile[key] for key in behavior_keys}
+    runtime_behavior = {key: profile[key] for key in behavior_keys}
+    assert_close(
+        legacy_behavior, EXPECTED_G001_LEGACY_PROFILE, "legacy launcher profile"
+    )
+    assert_close(runtime_behavior, legacy_behavior, "runtime vs legacy profile")
+    baseline_kwargs = g001_mover_kwargs(
+        sources, nav_reference, legacy_profile, include_g001_overlay=False
+    )
+    candidate_kwargs = g001_mover_kwargs(
+        sources, candidate, profile, include_g001_overlay=True
+    )
+    assert_close(
+        candidate_kwargs, baseline_kwargs, "g001 effective mover parameters"
+    )
+    return {
+        "profile_fields": len(profile),
+        "legacy_fields": len(behavior_keys),
+        "motion_profile": profile["motion_profile"],
+        "warmup_time_s": profile["warmup_time"],
+        "v_floor_mps": profile["v_floor"],
+        "profile": runtime_behavior,
+        "effective_mover_kwargs": candidate_kwargs,
     }
 
 
@@ -739,8 +943,14 @@ def validate_continuous_mapping_and_cancel(
     candidate_mover.time = clock
     writes: list[Any] = []
     candidate_mover.write_command = lambda *args, **kwargs: writes.append((args, kwargs))
+    mover_kwargs = g001_mover_kwargs(
+        sources,
+        candidate,
+        runtime_launcher_profile(sources, candidate),
+        include_g001_overlay=True,
+    )
     mover = candidate_mover.GrootMover(
-        cmd_file="/__offline_no_write__.json", **MOVER_KWARGS
+        cmd_file="/__offline_no_write__.json", **mover_kwargs
     )
     mover._motion_cancel = VirtualEvent(clock)
     try:
@@ -961,7 +1171,10 @@ def main() -> int:
         report,
         "motion_math_and_discrete_command_trace",
         lambda: validate_motion_math_and_traces(
-            sources, args.baseline_ref, args.candidate_ref
+            sources,
+            args.baseline_ref,
+            args.nav_reference_ref,
+            args.candidate_ref,
         ),
     )
     run_case(
@@ -975,6 +1188,13 @@ def main() -> int:
         report,
         "navigation_config_and_speed_contract",
         lambda: validate_config_contract(
+            sources, args.nav_reference_ref, args.candidate_ref
+        ),
+    )
+    run_case(
+        report,
+        "g001_runtime_profile_matches_legacy_launcher",
+        lambda: validate_g001_runtime_profile_contract(
             sources, args.nav_reference_ref, args.candidate_ref
         ),
     )
