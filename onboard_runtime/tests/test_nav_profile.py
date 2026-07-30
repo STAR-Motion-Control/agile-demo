@@ -227,6 +227,13 @@ def test_runtime_launcher_explicitly_passes_preserved_keyboard_speeds():
     assert "--vx '$FWD_CRUISE' --vy '$LAT_CRUISE' --wz '$YAW_CRUISE'" in launcher
 
 
+def test_runtime_launcher_preserves_g001_rclpy_stub_import_path():
+    launcher = RUNTIME_LAUNCHER.read_text(encoding="utf-8")
+
+    assert 'RCLPY_STUB_ROOT="${RCLPY_STUB_ROOT:-$HOME/zihou/rclpy_stub}"' in launcher
+    assert "PYTHONPATH='$REFACTOR_ROOT:$SDK_ROOT:$RCLPY_STUB_ROOT'" in launcher
+
+
 def test_runtime_launcher_writes_profile_before_starting_broker():
     launcher = RUNTIME_LAUNCHER.read_text(encoding="utf-8")
 

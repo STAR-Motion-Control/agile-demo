@@ -8,7 +8,7 @@
 /home/unitree/releases/agile-demo-refactor
 ```
 
-新版部署标签为 `g001-runtime-refactor-v1.3.3`。目录名不使用 Git 提交哈希；Git 提交号仅作为内部完整性记录。
+新版使用 `runtime-refactor-v1` 当前 HEAD，基于 `g001-runtime-refactor-v1.3.3`。本次 rclpy 兼容修复按现场要求不新建标签。
 
 当前标签已将导航 profile 的行为参数同步为旧真机 launcher 的实际默认值。5080 已验证旧、新 launcher profile 的命令规划与 MuJoCo 路线等价；这只是导航逻辑和速度契约验证，不代表真机位移、Jetson CPU 或三模块联合负载已经通过。
 
@@ -78,7 +78,7 @@ git log -1 --oneline
 
 - `pwd` 为 `/home/unitree/releases/agile-demo-refactor`。
 - 当前分支为 `runtime-refactor-v1`。
-- 当前标签为 `g001-runtime-refactor-v1.3.3`。
+- 当前分支为 `runtime-refactor-v1`，HEAD 包含 rclpy 兼容修复。
 - `git status --short` 没有源码修改。ONNX 模型受 `.gitignore` 管理，不应形成源码 dirty 状态。
 
 确认新目录不是旧目录的软链接：
@@ -517,7 +517,7 @@ pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py
 
 ```text
 日期/操作员：
-部署标签：g001-runtime-refactor-v1.3.3
+部署分支：runtime-refactor-v1（基于 g001-runtime-refactor-v1.3.3）
 新目录：/home/unitree/releases/agile-demo-refactor
 测试阶段：R0 / P0 / S0 / S1 / S2 / C0
 导航 profile 校验：通过 / 不通过

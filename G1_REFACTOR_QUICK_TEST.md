@@ -2,7 +2,7 @@
 
 新版目录：`/home/unitree/releases/agile-demo-refactor`
 
-适用标签：`g001-runtime-refactor-v1.3.3`
+适用版本：`runtime-refactor-v1` 当前 HEAD（基于 `g001-runtime-refactor-v1.3.3`）
 
 本标签已把导航 profile 同步为旧真机 launcher 的默认参数。5080 已验证旧、新 profile 的命令规划和 MuJoCo 路线一致；这不等于真机位移、Jetson CPU 或三模块联合负载已经通过。
 
@@ -27,11 +27,11 @@
 ssh unitree@10.33.12.89
 cd /home/unitree/releases/agile-demo-refactor
 git status --short --branch
-git describe --tags --exact-match
+git log -1 --oneline
 pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py|[a]gile_runtime_keyboard.py|[b]ox_demo_main.py|[b]ox_agent_tools_server.py|[o]nboard_runtime.motion_bus|[s]tart_g1_onboard'
 ```
 
-必须确认标签为 `g001-runtime-refactor-v1.3.3`、源码 clean，并记下现场进程。不要直接杀进程。
+必须确认分支为 `runtime-refactor-v1`、源码 clean，并记下现场进程。不要直接杀进程。
 
 ## 2. 运控 preflight 和启动
 
