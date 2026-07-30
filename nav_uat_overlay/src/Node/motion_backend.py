@@ -167,10 +167,10 @@ class GrootHttpDiscreteBackend:
         stop_hold_s = resolve_stop_hold(backend_cfg)
 
         mover_kwargs = {
-            "fwd_cruise": float(config_get(backend_cfg, "fwd_cruise", 0.40)),
-            "back_cruise": float(config_get(backend_cfg, "back_cruise", 0.20)),
+            "fwd_cruise": float(runtime_value("fwd_cruise", 0.40)),
+            "back_cruise": float(runtime_value("back_cruise", 0.20)),
             "lat_cruise": float(runtime_value("lat_cruise", 0.20)),
-            "yaw_cruise": float(config_get(backend_cfg, "yaw_cruise", 0.40)),
+            "yaw_cruise": float(runtime_value("yaw_cruise", 0.40)),
             "fwd_max": float(runtime_value("fwd_max", 0.50)),
             "back_max": float(runtime_value("back_max", 0.20)),
             "lat_max": float(runtime_value("lat_max", 0.30)),

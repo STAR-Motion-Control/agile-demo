@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from onboard_runtime.nav_profile import (
+    G001_LEGACY_NAV_CRUISE_DEFAULTS,
     G001_LEGACY_NAV_DEFAULTS,
     NavProfileError,
     build_runtime_profile,
@@ -26,6 +27,11 @@ RUNTIME_LAUNCHER = (
     / "box_demo_groot"
     / "start_g1_onboard_runtime.sh"
 )
+RUNTIME_TAPTAP_LAUNCHER = (
+    Path(__file__).resolve().parents[2]
+    / "box_demo_groot"
+    / "start_g1_onboard_runtime_taptap.sh"
+)
 
 
 def default_profile(**overrides):
@@ -36,7 +42,10 @@ def default_profile(**overrides):
         "fwd_max": 0.50,
         "lat_max": 0.30,
         "yaw_max": 0.60,
+        "fwd_cruise": 0.40,
+        "back_cruise": 0.20,
         "lat_cruise": 0.20,
+        "yaw_cruise": 0.40,
         "updated_at": 1234.5,
     }
     values.update(overrides)
@@ -113,15 +122,18 @@ def legacy_profile_from_launcher(tmp_path: Path) -> dict:
 def runtime_profile_from_launcher_config() -> dict:
     config = launcher_config(RUNTIME_LAUNCHER)
     limits = labeled_numbers(config["limits"])
-    heights = labeled_numbers(config["height"])
+    cruise = labeled_numbers(config["nav_cruise"])
     return build_runtime_profile(
         motion_bus_socket="/tmp/groot_motion_bus.sock",
-        stand_height=float(heights["stand"]),
-        walk_min_height=float(heights["walk_floor"]),
+        stand_height=float(config["stand_height"]),
+        walk_min_height=float(config["walk_height_floor"]),
         fwd_max=float(limits["fwd"]),
         lat_max=float(limits["lat"]),
         yaw_max=float(limits["yaw"]),
-        lat_cruise=float(config["nav_lat_cruise"]),
+        fwd_cruise=float(cruise["fwd"]),
+        back_cruise=float(cruise["back"]),
+        lat_cruise=float(cruise["lat"]),
+        yaw_cruise=float(cruise["yaw"]),
         updated_at=1234.5,
     )
 
@@ -131,6 +143,9 @@ def test_runtime_profile_matches_preserved_g001_defaults():
 
     assert {key: profile[key] for key in G001_LEGACY_NAV_DEFAULTS} == (
         G001_LEGACY_NAV_DEFAULTS
+    )
+    assert {key: profile[key] for key in G001_LEGACY_NAV_CRUISE_DEFAULTS} == (
+        G001_LEGACY_NAV_CRUISE_DEFAULTS
     )
     assert profile["schema_version"] == 3
     assert profile["source"] == "start_g1_onboard_runtime.sh"
@@ -155,6 +170,41 @@ def test_old_and_new_launcher_default_profiles_are_behaviorally_identical(tmp_pa
     assert runtime["motion_bus_socket"] == "/tmp/groot_motion_bus.sock"
 
 
+def test_runtime_print_config_matches_preserved_launcher_defaults():
+    legacy = launcher_config(LEGACY_LAUNCHER)
+    runtime = launcher_config(RUNTIME_LAUNCHER)
+    compatibility_keys = (
+        "controller",
+        "stand_height",
+        "walk_height_floor",
+        "nav_motion_profile",
+        "nav_warmup",
+        "nav_warmup_time",
+        "nav_warmup_speed",
+        "waist_to_rl_on_motion",
+        "limits",
+        "nav_lat_cruise",
+        "nav_runtime_config",
+    )
+
+    assert {key: runtime[key] for key in compatibility_keys} == {
+        key: legacy[key] for key in compatibility_keys
+    }
+    assert runtime["keyboard_speed"] == "vx:0.40,vy:0.20,wz:0.40"
+    assert runtime["nav_cruise"] == "fwd:0.40,back:0.20,lat:0.20,yaw:0.40"
+    assert runtime["direction_limits"] == "fwd:0.50,back:0.20,lat:0.30,yaw:0.60"
+
+
+def test_runtime_taptap_wrapper_prints_same_speed_contract_without_controller():
+    runtime = launcher_config(RUNTIME_LAUNCHER)
+    wrapper = launcher_config(RUNTIME_TAPTAP_LAUNCHER)
+
+    assert wrapper["limits"] == runtime["limits"]
+    assert wrapper["keyboard_speed"] == runtime["keyboard_speed"]
+    assert wrapper["nav_cruise"] == runtime["nav_cruise"]
+    assert wrapper["direction_limits"] == runtime["direction_limits"]
+
+
 def test_preserved_launcher_still_contains_the_profile_oracle():
     launcher = LEGACY_LAUNCHER.read_text(encoding="utf-8")
 
@@ -165,6 +215,16 @@ def test_preserved_launcher_still_contains_the_profile_oracle():
     assert '"v_floor": 0.12' in launcher
     assert '"w_floor": 0.10' in launcher
     assert '"waist_to_rl_on_motion": waist_rl == "1"' in launcher
+    assert "--vx 0.40 --vy '$LAT_CRUISE' --wz 0.40" in launcher
+
+
+def test_runtime_launcher_explicitly_passes_preserved_keyboard_speeds():
+    launcher = RUNTIME_LAUNCHER.read_text(encoding="utf-8")
+
+    assert 'FWD_CRUISE="0.40"' in launcher
+    assert 'BACK_CRUISE="0.20"' in launcher
+    assert 'YAW_CRUISE="0.40"' in launcher
+    assert "--vx '$FWD_CRUISE' --vy '$LAT_CRUISE' --wz '$YAW_CRUISE'" in launcher
 
 
 def test_runtime_launcher_writes_profile_before_starting_broker():
@@ -182,6 +242,9 @@ def test_runtime_launcher_writes_profile_before_starting_broker():
         ("warmup_time", 0.6),
         ("v_floor", 0.10),
         ("lat_max", 0.40),
+        ("fwd_cruise", 0.30),
+        ("back_cruise", 0.10),
+        ("yaw_cruise", 0.30),
         ("stand_height", 0.74),
     ],
 )

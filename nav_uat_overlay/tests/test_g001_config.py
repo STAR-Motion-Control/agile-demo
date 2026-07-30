@@ -61,13 +61,20 @@ def test_g001_runtime_profile_resolves_to_legacy_mover_parameters(
         fwd_max=0.50,
         lat_max=0.30,
         yaw_max=0.60,
+        fwd_cruise=0.40,
+        back_cruise=0.20,
         lat_cruise=0.20,
+        yaw_cruise=0.40,
         updated_at=1234.5,
     )
     write_profile(profile_path, profile)
 
     with initialize_config_dir(version_base=None, config_dir=str(CONFIG_ROOT)):
         cfg = compose(config_name="config_g001")
+    cfg.motion_backend.fwd_cruise = 0.11
+    cfg.motion_backend.back_cruise = 0.12
+    cfg.motion_backend.lat_cruise = 0.13
+    cfg.motion_backend.yaw_cruise = 0.14
     cfg.motion_backend.profile_file = str(profile_path)
     cfg.motion_backend.runtime_module_path = str(REPO_ROOT)
     cfg.motion_backend.box_demo_module_path = str(REPO_ROOT / "box_demo_groot")

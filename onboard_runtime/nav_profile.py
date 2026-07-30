@@ -36,6 +36,16 @@ G001_LEGACY_NAV_DEFAULTS: dict[str, Any] = {
     "waist_to_rl_on_motion": True,
 }
 
+# The preserved launcher only serialized lat_cruise; the other three cruise
+# speeds came from config_bk.yaml.  Keep all four explicit in the refactored
+# profile so a YAML fallback cannot silently change live G1-001 motion speed.
+G001_LEGACY_NAV_CRUISE_DEFAULTS: dict[str, float] = {
+    "fwd_cruise": 0.40,
+    "back_cruise": 0.20,
+    "lat_cruise": 0.20,
+    "yaw_cruise": 0.40,
+}
+
 
 class NavProfileError(RuntimeError):
     pass
@@ -56,7 +66,10 @@ def build_runtime_profile(
     fwd_max: float,
     lat_max: float,
     yaw_max: float,
+    fwd_cruise: float,
+    back_cruise: float,
     lat_cruise: float,
+    yaw_cruise: float,
     updated_at: float | None = None,
 ) -> dict[str, Any]:
     """Return the motion-bus profile with legacy G1-001 motion semantics."""
@@ -68,7 +81,10 @@ def build_runtime_profile(
     fwd_max = _finite_float("fwd_max", fwd_max)
     lat_max = _finite_float("lat_max", lat_max)
     yaw_max = _finite_float("yaw_max", yaw_max)
+    fwd_cruise = _finite_float("fwd_cruise", fwd_cruise)
+    back_cruise = _finite_float("back_cruise", back_cruise)
     lat_cruise = _finite_float("lat_cruise", lat_cruise)
+    yaw_cruise = _finite_float("yaw_cruise", yaw_cruise)
     timestamp = (
         time.time() if updated_at is None else _finite_float("updated_at", updated_at)
     )
@@ -79,13 +95,17 @@ def build_runtime_profile(
         "motion_backend": "groot_motion_bus",
         "motion_bus_socket": motion_bus_socket,
         **G001_LEGACY_NAV_DEFAULTS,
+        **G001_LEGACY_NAV_CRUISE_DEFAULTS,
         "stand_height": stand_height,
         "walk_min_height": walk_min_height,
         "fwd_max": fwd_max,
         "back_max": min(0.20, fwd_max),
         "lat_max": lat_max,
         "yaw_max": yaw_max,
+        "fwd_cruise": fwd_cruise,
+        "back_cruise": back_cruise,
         "lat_cruise": lat_cruise,
+        "yaw_cruise": yaw_cruise,
         "updated_at": timestamp,
     }
     return profile
@@ -127,7 +147,11 @@ def validate_g001_legacy_profile(
         "source": PROFILE_SOURCE,
         "motion_backend": "groot_motion_bus",
     }
-    expected = {**expected_metadata, **G001_LEGACY_NAV_DEFAULTS}
+    expected = {
+        **expected_metadata,
+        **G001_LEGACY_NAV_DEFAULTS,
+        **G001_LEGACY_NAV_CRUISE_DEFAULTS,
+    }
     if expected_socket is not None:
         expected["motion_bus_socket"] = expected_socket
 
@@ -148,8 +172,14 @@ def validate_g001_legacy_profile(
 
 
 def _print_contract() -> None:
-    for key, value in G001_LEGACY_NAV_DEFAULTS.items():
-        rendered = str(value).lower() if isinstance(value, bool) else value
+    contract = {**G001_LEGACY_NAV_DEFAULTS, **G001_LEGACY_NAV_CRUISE_DEFAULTS}
+    for key, value in contract.items():
+        if isinstance(value, bool):
+            rendered: str | float = str(value).lower()
+        elif isinstance(value, float):
+            rendered = f"{value:.2f}"
+        else:
+            rendered = value
         print(f"nav_{key}={rendered}")
 
 
@@ -165,7 +195,10 @@ def _parser() -> argparse.ArgumentParser:
     write.add_argument("--fwd-max", required=True, type=float)
     write.add_argument("--lat-max", required=True, type=float)
     write.add_argument("--yaw-max", required=True, type=float)
+    write.add_argument("--fwd-cruise", required=True, type=float)
+    write.add_argument("--back-cruise", required=True, type=float)
     write.add_argument("--lat-cruise", required=True, type=float)
+    write.add_argument("--yaw-cruise", required=True, type=float)
 
     validate = subparsers.add_parser("validate")
     validate.add_argument("--input", required=True, type=Path)
@@ -188,7 +221,10 @@ def main() -> int:
             fwd_max=args.fwd_max,
             lat_max=args.lat_max,
             yaw_max=args.yaw_max,
+            fwd_cruise=args.fwd_cruise,
+            back_cruise=args.back_cruise,
             lat_cruise=args.lat_cruise,
+            yaw_cruise=args.yaw_cruise,
         )
         write_profile(args.output, profile)
         return 0

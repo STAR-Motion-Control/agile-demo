@@ -8,7 +8,7 @@
 /home/unitree/releases/agile-demo-refactor
 ```
 
-新版部署标签为 `g001-runtime-refactor-v1.3.2`。目录名不使用 Git 提交哈希；Git 提交号仅作为内部完整性记录。
+新版部署标签为 `g001-runtime-refactor-v1.3.3`。目录名不使用 Git 提交哈希；Git 提交号仅作为内部完整性记录。
 
 当前标签已将导航 profile 的行为参数同步为旧真机 launcher 的实际默认值。5080 已验证旧、新 launcher profile 的命令规划与 MuJoCo 路线等价；这只是导航逻辑和速度契约验证，不代表真机位移、Jetson CPU 或三模块联合负载已经通过。
 
@@ -60,7 +60,7 @@
 
 Conda 自动激活只是 launcher 的运行机制，不表示运控业务绑定到某个环境。本文沿用该机制，不修改、不覆盖，也不额外探测环境。
 
-`config_g001` 保留了现场外置相机、5 FPS、开环模式和现场地图副本，并把旧 HTTP/JSON 命令链替换为 motion bus。新 launcher 会显式写入旧版 profile 的 14 个行为字段，`config_g001` 启动前会强制校验，这 14 个字段不再回落到 YAML。其他导航参数仍按 `config_g001`/`config_bk` 的原有 YAML 读取。
+`config_g001` 保留了现场外置相机、5 FPS、开环模式和现场地图副本，并把旧 HTTP/JSON 命令链替换为 motion bus。新 launcher 会显式写入旧版 profile 的 14 个行为字段，并把原来由 YAML 提供的前进、后退、偏航 3 个巡航速度也纳入 profile。`config_g001` 启动前会强制校验这 17 个字段，不再让速度回落到 YAML 默认值。其他导航参数仍按 `config_g001`/`config_bk` 的原有 YAML 读取。
 
 ## 3. 同步后只读验收
 
@@ -78,7 +78,7 @@ git log -1 --oneline
 
 - `pwd` 为 `/home/unitree/releases/agile-demo-refactor`。
 - 当前分支为 `runtime-refactor-v1`。
-- 当前标签为 `g001-runtime-refactor-v1.3.2`。
+- 当前标签为 `g001-runtime-refactor-v1.3.3`。
 - `git status --short` 没有源码修改。ONNX 模型受 `.gitignore` 管理，不应形成源码 dirty 状态。
 
 确认新目录不是旧目录的软链接：
@@ -200,6 +200,12 @@ bash box_demo_groot/start_g1_onboard_runtime_taptap.sh \
 核对输出：
 
 ```text
+stand_height=0.76
+walk_height_floor=0.72
+keyboard_speed=vx:0.40,vy:0.20,wz:0.40
+nav_cruise=fwd:0.40,back:0.20,lat:0.20,yaw:0.40
+limits=fwd:0.50,lat:0.30,yaw:0.60,height_rate:0.20
+direction_limits=fwd:0.50,back:0.20,lat:0.30,yaw:0.60
 refactor_root=/home/unitree/releases/agile-demo-refactor
 groot_repo=/home/unitree/releases/agile-demo-refactor
 iface/domain=enP8p1s0/0
@@ -212,6 +218,8 @@ health max gap threshold=60 ms
 RL stale threshold=0.12 s
 manip_ingress=0
 ```
+
+`limits` 保留旧 launcher 的原样输出，`direction_limits` 把固定的后退上限 `0.20` 也显式列出。新 launcher 会把键盘 `vx/vy/wz` 显式传入，并把四个导航巡航速度写入 runtime profile，不再依赖 Python 或 YAML 默认值。
 
 确认相关旧控制进程已经正常退出后执行 preflight：
 
@@ -298,7 +306,10 @@ fwd_max=0.50
 back_max=0.20
 lat_max=0.30
 yaw_max=0.60
+fwd_cruise=0.40
+back_cruise=0.20
 lat_cruise=0.20
+yaw_cruise=0.40
 v_floor=0.12
 w_floor=0.10
 waist_to_rl_on_motion=true
@@ -506,7 +517,7 @@ pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py
 
 ```text
 日期/操作员：
-部署标签：g001-runtime-refactor-v1.3.2
+部署标签：g001-runtime-refactor-v1.3.3
 新目录：/home/unitree/releases/agile-demo-refactor
 测试阶段：R0 / P0 / S0 / S1 / S2 / C0
 导航 profile 校验：通过 / 不通过

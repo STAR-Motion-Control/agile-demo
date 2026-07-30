@@ -44,6 +44,11 @@ LAT_MAX="${LAT_MAX:-0.30}"
 LAT_CRUISE="${LAT_CRUISE:-0.20}"
 YAW_MAX="${YAW_MAX:-0.60}"
 HEIGHT_RATE="${HEIGHT_RATE:-0.20}"
+# Match start_g1_onboard_nav.sh exactly.  The preserved launcher hard-codes
+# keyboard vx/wz to 0.40 and config_bk.yaml supplies these nav cruise speeds.
+FWD_CRUISE="0.40"
+BACK_CRUISE="0.20"
+YAW_CRUISE="0.40"
 TORCH_THREADS="${TORCH_THREADS:-1}"
 NATIVE_THREADS="${GROOT_NATIVE_THREADS:-1}"
 ORT_INTRA="${GROOT_ORT_INTRA_OP_THREADS:-1}"
@@ -159,6 +164,20 @@ PY
 
 print_config() {
     echo "controller=$CTRL"
+    # Keep this compatibility block identical to the preserved launcher.
+    echo "stand_height=$STAND_HEIGHT"
+    echo "walk_height_floor=$WALK_FLOOR"
+    echo "nav_motion_profile=precise"
+    echo "nav_warmup=off"
+    echo "nav_warmup_time=0.0"
+    echo "nav_warmup_speed=0.15"
+    echo "waist_to_rl_on_motion=1"
+    echo "limits=fwd:$FWD_MAX,lat:$LAT_MAX,yaw:$YAW_MAX,height_rate:$HEIGHT_RATE"
+    echo "nav_lat_cruise=$LAT_CRUISE"
+    echo "nav_runtime_config=$NAV_PROFILE_FILE"
+    echo "keyboard_speed=vx:$FWD_CRUISE,vy:$LAT_CRUISE,wz:$YAW_CRUISE"
+    echo "nav_cruise=fwd:$FWD_CRUISE,back:$BACK_CRUISE,lat:$LAT_CRUISE,yaw:$YAW_CRUISE"
+    echo "direction_limits=fwd:$FWD_MAX,back:0.20,lat:$LAT_MAX,yaw:$YAW_MAX"
     echo "refactor_root=$REFACTOR_ROOT"
     echo "groot_repo=$GROOT_REPO"
     echo "sdk_root=$SDK_ROOT"
@@ -170,15 +189,12 @@ print_config() {
     echo "runtime_id=${RUNTIME_ID:-<generated-on-start>}"
     echo "arm_control=$ARM_SOCKET"
     echo "arm_runtime=$ARM_RUNTIME_SOCKET (merger is sole DDS owner)"
-    echo "limits=fwd:$FWD_MAX,lat:$LAT_MAX,yaw:$YAW_MAX,height_rate:$HEIGHT_RATE"
-    echo "height=stand:$STAND_HEIGHT,walk_floor:$WALK_FLOOR"
     echo "threads=native:$NATIVE_THREADS,torch:$TORCH_THREADS,ort_intra:$ORT_INTRA,ort_inter:$ORT_INTER"
     echo "ort_mode=$ORT_MODE,ort_spinning=$ORT_SPIN"
     echo "startup=broker:${BROKER_STARTUP_TIMEOUT}s,merger:${MERGER_STARTUP_TIMEOUT}s,composite:${COMPOSITE_STARTUP_TIMEOUT}s,max_age:${STARTUP_MAX_AGE}s,stable:${STARTUP_STABLE_S}s"
     echo "keyboard=$KEYBOARD"
     echo "manip_ingress=$MANIP_INGRESS ($MANIP_HOST:$MANIP_PORT)"
     echo "manip_vision_log=$MANIP_VISION_LOG"
-    python3 "$REFACTOR_ROOT/onboard_runtime/nav_profile.py" show-contract
 }
 
 if [[ "$PRINT_CONFIG" == "1" ]]; then
@@ -255,7 +271,10 @@ python3 "$REFACTOR_ROOT/onboard_runtime/nav_profile.py" write \
     --fwd-max "$FWD_MAX" \
     --lat-max "$LAT_MAX" \
     --yaw-max "$YAW_MAX" \
-    --lat-cruise "$LAT_CRUISE"
+    --fwd-cruise "$FWD_CRUISE" \
+    --back-cruise "$BACK_CRUISE" \
+    --lat-cruise "$LAT_CRUISE" \
+    --yaw-cruise "$YAW_CRUISE"
 
 SANITIZE="unset LD_LIBRARY_PATH AMENT_PREFIX_PATH COLCON_PREFIX_PATH ROS_DISTRO ROS_VERSION ROS_PYTHON_VERSION ROS_LOCALHOST_ONLY PYTHONPATH"
 SETUP="$SANITIZE; source \$HOME/miniconda3/etc/profile.d/conda.sh && conda activate '$CONDA_ENV' && export UNITREE_DDS_INTERFACE='$IFACE' GROOT_RUNTIME_ID='$RUNTIME_ID' GROOT_MOTION_BUS_SOCKET='$BUS_SOCKET' GROOT_ADAPTER_COMMAND_SOCKET='$ADAPTER_CMD_SOCKET' GROOT_MERGER_COMMAND_SOCKET='$MERGER_CMD_SOCKET' GROOT_ARM_RUNTIME_SOCKET='$ARM_RUNTIME_SOCKET' OMP_NUM_THREADS='$NATIVE_THREADS' OMP_DYNAMIC='FALSE' MKL_NUM_THREADS='$NATIVE_THREADS' OPENBLAS_NUM_THREADS='$NATIVE_THREADS' NUMEXPR_NUM_THREADS='$NATIVE_THREADS' VECLIB_MAXIMUM_THREADS='$NATIVE_THREADS' OPENCV_FOR_THREADS_NUM='$NATIVE_THREADS' PYTHONPATH='$REFACTOR_ROOT:$SDK_ROOT'"
@@ -408,7 +427,7 @@ if [[ "$KEYBOARD" == "1" ]]; then
             --arm-control-status-file '$ARM_STATUS_FILE' \
             --stand-height '$STAND_HEIGHT' \
             --min-height 0.30 --max-height 0.80 \
-            --vy '$LAT_CRUISE'
+            --vx '$FWD_CRUISE' --vy '$LAT_CRUISE' --wz '$YAW_CRUISE'
         echo '[keyboard exited]'; exec bash"
 fi
 

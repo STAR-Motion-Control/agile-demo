@@ -52,7 +52,10 @@ PROFILE_MOVER_KEYS = (
     "back_max",
     "lat_max",
     "yaw_max",
+    "fwd_cruise",
+    "back_cruise",
     "lat_cruise",
+    "yaw_cruise",
     "v_floor",
     "w_floor",
     "warmup_time",
@@ -101,7 +104,10 @@ def load_navigation_profile(path: Path | None) -> dict[str, Any]:
         fwd_max=0.50,
         lat_max=0.30,
         yaw_max=0.60,
+        fwd_cruise=0.40,
+        back_cruise=0.20,
         lat_cruise=0.20,
+        yaw_cruise=0.40,
     )
 
 

@@ -2,7 +2,7 @@
 
 新版目录：`/home/unitree/releases/agile-demo-refactor`
 
-适用标签：`g001-runtime-refactor-v1.3.2`
+适用标签：`g001-runtime-refactor-v1.3.3`
 
 本标签已把导航 profile 同步为旧真机 launcher 的默认参数。5080 已验证旧、新 profile 的命令规划和 MuJoCo 路线一致；这不等于真机位移、Jetson CPU 或三模块联合负载已经通过。
 
@@ -31,7 +31,7 @@ git describe --tags --exact-match
 pgrep -af '[r]un_ros.py|[g]root_wbc_boxdemo_adapter.py|[m]erge_lowcmd_arm_sdk.py|[a]gile_runtime_keyboard.py|[b]ox_demo_main.py|[b]ox_agent_tools_server.py|[o]nboard_runtime.motion_bus|[s]tart_g1_onboard'
 ```
 
-必须确认标签为 `g001-runtime-refactor-v1.3.2`、源码 clean，并记下现场进程。不要直接杀进程。
+必须确认标签为 `g001-runtime-refactor-v1.3.3`、源码 clean，并记下现场进程。不要直接杀进程。
 
 ## 2. 运控 preflight 和启动
 
@@ -45,6 +45,17 @@ bash box_demo_groot/start_g1_onboard_runtime_taptap.sh \
 ```
 
 必须看到 `preflight passed; nothing started`。
+
+同时确认速度三行与旧启动脚本一致：
+
+```text
+keyboard_speed=vx:0.40,vy:0.20,wz:0.40
+nav_cruise=fwd:0.40,back:0.20,lat:0.20,yaw:0.40
+limits=fwd:0.50,lat:0.30,yaw:0.60,height_rate:0.20
+direction_limits=fwd:0.50,back:0.20,lat:0.30,yaw:0.60
+```
+
+`keyboard_speed` 是手动键盘命令，`nav_cruise` 是导航巡航速度，`limits` 保留旧 launcher 的原样输出，`direction_limits` 把其中固定的后退上限 `0.20` 也显式列出。
 
 获得本次新版运控启动授权后：
 
@@ -99,7 +110,7 @@ python onboard_runtime/nav_profile.py validate \
 
 必须看到 `G1-001 navigation profile matches preserved legacy defaults`。该检查会确认旧版的 `precise`、关闭 warmup、速度下限、站高和速度上限；不一致时禁止启动导航。
 
-它校验的是旧真机实际默认值：站高/行走下限 `0.76/0.72 m`，warmup `false/0.0 s/0.15 m/s`，前进/后退/横移/偏航上限 `0.50/0.20/0.30/0.60`，横移巡航 `0.20`，线速度/角速度下限 `0.12/0.10`。不要在现场手工改这些参数。
+它校验的是旧真机实际默认值：站高/行走下限 `0.76/0.72 m`，warmup `false/0.0 s/0.15 m/s`，导航前进/后退/横移/偏航巡航速度 `0.40/0.20/0.20/0.40`，对应安全上限 `0.50/0.20/0.30/0.60`，线速度/角速度下限 `0.12/0.10`。不要在现场手工改这些参数。
 
 检查导航输入：
 
